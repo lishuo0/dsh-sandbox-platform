@@ -1,0 +1,18 @@
+# 本地数据库。项目名固定，和脑里的同一份，避免起两个库抢 5432。
+
+name: dsh-sandbox
+
+services:
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: dsh
+      POSTGRES_PASSWORD: dsh
+      POSTGRES_DB: dsh
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
