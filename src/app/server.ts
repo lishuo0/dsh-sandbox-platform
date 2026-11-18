@@ -3,10 +3,13 @@ import { startClientHost } from '../client/host.js'
 import { createClientSurface } from '../client/surface.js'
 import { startHttp, type Route } from '../kernel/http.js'
 import { attachmentRoutes } from '../modules/attachments/routes.js'
+import { feedbackRoutes } from '../modules/feedback/routes.js'
+import { groupRoutes } from '../modules/groups/routes.js'
 import { identityRoutes } from '../modules/identity/routes.js'
 import { mcpRoutes } from '../modules/mcp/routes.js'
 import { modelRoutes } from '../modules/models/routes.js'
 import { opsRoutes } from '../modules/ops/routes.js'
+import { scheduleRoutes } from '../modules/schedule/routes.js'
 import { sessionRoutes } from '../modules/sessions/routes.js'
 import { skillRoutes } from '../modules/skills/routes.js'
 import { workspaceRoutes } from '../modules/workspaces/routes.js'
@@ -19,7 +22,10 @@ const modules: Array<(deps: Deps) => Route[]> = [
   sessionRoutes,
   skillRoutes,
   mcpRoutes,
+  groupRoutes,
+  feedbackRoutes,
   attachmentRoutes,
+  scheduleRoutes,
   opsRoutes,
 ]
 

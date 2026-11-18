@@ -1,6 +1,7 @@
 import type { Deps } from '../../app/deps.js'
 import { HttpError } from '../../kernel/errors.js'
 import type { Route } from '../../kernel/http.js'
+import { readSignedUpload } from '../sessions/attachment.js'
 import { listAttachments, saveAttachment } from './service.js'
 
 function mediaType(value: string | string[] | undefined): string {
@@ -10,6 +11,27 @@ function mediaType(value: string | string[] | undefined): string {
 
 export function attachmentRoutes(deps: Deps): Route[] {
   return [
+    {
+      // 图片预览用的只读地址：签名按成员签发，且要求登录态；地址到期即失效。
+      method: 'GET',
+      path: '/files',
+      auth: 'member',
+      handle: async (ctx) => {
+        const params = ctx.url.searchParams
+        const { data, mediaType } = await readSignedUpload(deps.objects, deps.credentialsKey, ctx.actor!.id, {
+          workspaceId: params.get('w') ?? '',
+          key: params.get('k') ?? '',
+          expires: params.get('e') ?? '',
+          signature: params.get('sig') ?? '',
+        })
+        ctx.res.writeHead(200, {
+          'content-type': mediaType,
+          'content-length': data.byteLength,
+          'cache-control': 'private, max-age=3600',
+        })
+        ctx.res.end(data)
+      },
+    },
     {
       method: 'GET',
       path: '/attachments',

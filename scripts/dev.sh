@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# 一键启动本地数据库、脑和平台。数据库在 Docker 里。
+# 管理平台本地开发：数据库和平台进程。
+# config.yaml 默认 database.file（SQLite，不需要安装数据库和 Docker）；
+# 配了 database.url 才启动 PostgreSQL（优先 Docker，没有 Docker 时用本地 PostgreSQL）。
 #   ./scripts/dev.sh
 #   ./scripts/dev.sh stop
 #   ./scripts/dev.sh status
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BRAIN="$(cd "$ROOT/.." && pwd)/dsh-sandbox-brain"
 RUN="$ROOT/var/run"
 LOG="$ROOT/var/log"
+PG_DIR="$ROOT/var/pg"
 CMD="${1:-start}"
+DB="$(node "$ROOT/scripts/ensure-config.mjs" --db)"
+DB_KIND="${DB%% *}"
+DB_FILE="${DB#* }"
 
 mkdir -p "$RUN" "$LOG" "$ROOT/var/objects"
 
@@ -61,7 +66,7 @@ start_node() {
     return
   fi
   if [[ ! -d "$dir" ]]; then
-    echo "没有找到 $dir，跳过 $name" >&2
+    echo "没有找到 ${dir}，跳过 $name" >&2
     return
   fi
   echo "启动 $name"
@@ -84,66 +89,116 @@ start_node() {
     fi
     sleep 1
   done
-  echo "$name 在 90 秒内没有监听 $port，最后日志：" >&2
+  echo "$name 在 90 秒内没有监听 ${port}，最后日志：" >&2
   tail -n 50 "$LOG/$name.log" >&2 || true
   exit 1
 }
 
+docker_ready() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
 ensure_docker() {
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "没有 docker。安装并启动 Docker 后再执行 ./scripts/dev.sh" >&2
-    exit 1
+  if docker_ready; then
+    return 0
   fi
-  if docker info >/dev/null 2>&1; then
-    return
+  if ! command -v docker >/dev/null 2>&1; then
+    return 1
   fi
   if command -v colima >/dev/null 2>&1; then
     echo "启动 Colima"
     colima start
-    return
+    return 0
   fi
-  echo "Docker 没有在运行。" >&2
-  exit 1
+  return 1
+}
+
+local_pg_ready() {
+  command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1 &&
+    command -v pg_isready >/dev/null 2>&1 && command -v createdb >/dev/null 2>&1
+}
+
+start_local_database() {
+  echo "启动数据库（本地 PostgreSQL，${PG_DIR}）"
+  if [[ ! -f "$PG_DIR/PG_VERSION" ]]; then
+    LC_ALL=C initdb -D "$PG_DIR" -U dsh --auth-local=trust --auth-host=trust -E UTF8 --locale=C >/dev/null
+  fi
+  if ! pg_ctl -D "$PG_DIR" status >/dev/null 2>&1; then
+    LC_ALL=C pg_ctl -D "$PG_DIR" -l "$LOG/postgres.log" -o "-p 5432 -k /tmp" start >/dev/null
+  fi
+  local i
+  for i in $(seq 1 60); do
+    pg_isready -h 127.0.0.1 -p 5432 -U dsh >/dev/null 2>&1 && break
+    sleep 1
+  done
+  if ! pg_isready -h 127.0.0.1 -p 5432 -U dsh >/dev/null 2>&1; then
+    echo "数据库在 60 秒内没有就绪，日志 $LOG/postgres.log" >&2
+    exit 1
+  fi
+  createdb -h 127.0.0.1 -p 5432 -U dsh dsh 2>/dev/null || true
+  echo "数据库就绪 :5432"
 }
 
 start_database() {
-  ensure_docker
-  echo "启动数据库"
-  compose up -d
-  local i
-  for i in $(seq 1 60); do
-    if compose exec -T postgres pg_isready -U dsh -d dsh >/dev/null 2>&1; then
-      echo "数据库就绪 :5432"
-      return
-    fi
-    sleep 1
-  done
-  echo "数据库在 60 秒内没有就绪" >&2
-  compose logs --tail 40 postgres >&2 || true
+  if port_open 5432; then
+    echo "数据库就绪 :5432"
+    return
+  fi
+  if ! docker_ready && ensure_docker; then
+    :
+  fi
+  if docker_ready; then
+    echo "启动数据库（Docker）"
+    compose up -d
+    local i
+    for i in $(seq 1 60); do
+      if compose exec -T postgres pg_isready -U dsh -d dsh >/dev/null 2>&1; then
+        echo "数据库就绪 :5432"
+        return
+      fi
+      sleep 1
+    done
+    echo "数据库在 60 秒内没有就绪" >&2
+    compose logs --tail 40 postgres >&2 || true
+    exit 1
+  fi
+  if local_pg_ready; then
+    start_local_database
+    return
+  fi
+  echo "没有 Docker，也没有本地 PostgreSQL。安装 Docker，或 brew install postgresql@16。" >&2
   exit 1
 }
 
 case "$CMD" in
   stop)
     stop_one platform
-    stop_one brain
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-      compose stop
+    if [[ "$DB_KIND" == "postgres" ]]; then
+      if docker_ready; then
+        compose stop
+      elif [[ -f "$PG_DIR/PG_VERSION" ]] && pg_ctl -D "$PG_DIR" status >/dev/null 2>&1; then
+        pg_ctl -D "$PG_DIR" stop -m fast >/dev/null
+      fi
     fi
     echo "已停止"
     ;;
   status)
-    port_open 5432 && echo "postgres :5432" || echo "postgres 未监听"
-    port_open 8080 && echo "brain    :8080" || echo "brain 未监听"
+    if [[ "$DB_KIND" == "sqlite" ]]; then
+      echo "sqlite $DB_FILE"
+    else
+      port_open 5432 && echo "postgres :5432" || echo "postgres 未监听"
+    fi
     port_open 3000 && echo "platform :3000" || echo "platform 未监听"
     ;;
   start)
     node "$ROOT/scripts/ensure-config.mjs"
-    start_database
-    start_node brain "$BRAIN" 8080
+    if [[ "$DB_KIND" == "sqlite" ]]; then
+      echo "数据库 SQLite（${DB_FILE}），不需要启动数据库"
+    else
+      start_database
+    fi
     start_node platform "$ROOT" 3000
     echo "平台 http://127.0.0.1:3000"
-    echo "脑   http://127.0.0.1:8080"
     echo "日志 $LOG"
     ;;
   *)

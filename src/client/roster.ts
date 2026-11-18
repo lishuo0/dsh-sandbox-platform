@@ -50,13 +50,28 @@ export const clientPackages = [
   '@deepseek-ai/dsh-client-ui-message-feedback',
   '@deepseek-ai/dsh-client-ui-model-selection',
   '@deepseek-ai/dsh-client-ui-permission-presets',
-  '@deepseek-ai/dsh-client-ui-agent-preset',
+  // 预设页、会话里的预设选择器和「创建插件」入口都在
+  // `@deepseek-ai/dsh-client-ui-agent-preset` 里；平台只有 `platform` 一个预设，
+  // 这些入口没有可选对象，整包不进图。
   '@deepseek-ai/dsh-client-ui-plan',
   '@deepseek-ai/dsh-client-ui-user-questions',
   '@deepseek-ai/dsh-client-ui-trajectory',
   '@deepseek-ai/dsh-client-ui-goal',
+  // 官方定时任务页：侧边栏主面板、会话行标记和轮次卡片。数据走
+  // `P/remote/schedule/*`，由平台补当前成员的会话范围。
+  '@deepseek-ai/dsh-client-ui-schedule',
+  // 后台任务：客户端半提供 `ctx.jobs`（`remote.job` 由已在图内的
+  // `@deepseek-ai/dsh-api-remotes` 注册），`dsh-client-ui-jobs` 出会话头部的
+  // 任务列表、输出跟随和单个 kill。脑侧同名包提供 `job` Remote 命名空间。
+  '@deepseek-ai/dsh-api-job-controller',
+  '@deepseek-ai/dsh-client-ui-jobs',
   '@deepseek-ai/dsh-message-quotes',
-  '@deepseek-ai/dsh-cordis-client-runner',
+  // 模型正文里的 `dsh-ui` 围栏由这一半渲染；宿主半在平台进程里等不到
+  // systemPrompt，只保持挂起，浏览器半照常进图。
+  '@changfenhuang/dsh-genui',
+  // 上下文洞察的侧栏、会话标签和 `/context` 弹窗。数据由平台投影；
+  // 页面里的 `api/dsh-context/*` 被传输垫片改写到 `P/context/*`，不转给脑。
+  'dsh-context',
 ] as const
 
 /**

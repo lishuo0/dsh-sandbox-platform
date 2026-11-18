@@ -19,8 +19,14 @@ export function readToken(secret: string, token: string): TokenClaims | undefine
   const left = Buffer.from(sig)
   const right = Buffer.from(expected)
   if (left.length !== right.length || !timingSafeEqual(left, right)) return undefined
-  const data = JSON.parse(Buffer.from(body, 'base64url').toString()) as Partial<TokenClaims>
-  if (!data.sub || !data.exp || data.exp < Date.now() / 1000) return undefined
+  let data: Partial<TokenClaims>
+  try {
+    data = JSON.parse(Buffer.from(body, 'base64url').toString()) as Partial<TokenClaims>
+  } catch {
+    return undefined
+  }
+  if (typeof data.sub !== 'string' || !data.sub) return undefined
+  if (typeof data.exp !== 'number' || data.exp < Date.now() / 1000) return undefined
   return { sub: data.sub, exp: data.exp }
 }
 

@@ -25,7 +25,7 @@ export async function findMember(db: Querier, id: string): Promise<Member | unde
 
 export async function authenticate(db: Querier, username: string, password: string): Promise<Member | undefined> {
   const rows = await db.query(`SELECT id, display_name, role, status, password_hash FROM dsh_users WHERE id = $1`, [username])
-  const row = rows.rows[0] as (MemberRow & { password_hash: string }) | undefined
+  const row = rows.rows[0] as unknown as (MemberRow & { password_hash: string }) | undefined
   if (!row || row.status !== 'active' || !verifyPassword(password, row.password_hash)) return undefined
   return mapMember(row)
 }
@@ -81,6 +81,17 @@ export async function updateMember(db: Db, id: string, patch: MemberPatch): Prom
       [id, patch.displayName ?? null, patch.role ?? null, patch.status ?? null, patch.password ? hashPassword(patch.password) : null],
     )
   })
+}
+
+/** 管理员改别人的角色；不允许顺手把自己降级，避免误操作丢掉管理入口。 */
+export async function setMemberRole(db: Db, actorId: string, targetId: string, rawRole: unknown): Promise<Member> {
+  const role = typeof rawRole === 'string' ? rawRole.trim() : ''
+  if (role !== 'admin' && role !== 'member') throw new HttpError(422, 'invalid-role')
+  if (targetId === actorId && role !== 'admin') throw new HttpError(422, 'cannot-demote-self')
+  await updateMember(db, targetId, { role })
+  const updated = await findMember(db, targetId)
+  if (!updated) throw new HttpError(404, 'not-found')
+  return updated
 }
 
 export async function ensureAdmin(db: Querier, username: string, password: string): Promise<void> {

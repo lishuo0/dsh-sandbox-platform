@@ -14,6 +14,13 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { bootInjections } from '@deepseek-ai/dsh-client-modules'
 import { renderIndexInjections } from '@deepseek-ai/dsh-host-webserver'
 import { clientPackages, requiredClientPackages } from './roster.js'
+import { patchPluginResponse } from './patch.js'
+import { userBadge } from './user-badge.js'
+import { platformConsole } from './console.js'
+import { workspaceCreate } from './workspace-create.js'
+import { filesUpload } from './files-upload.js'
+import { platformModelSettings } from './model-settings.js'
+import { bootAsset } from './boot-assets.js'
 
 export interface ClientHost {
   /** 注入了 `__DSH_BOOT__` 的外壳页面。 */
@@ -63,7 +70,13 @@ export async function startClientHost(): Promise<ClientHost> {
       throw new Error(`客户端包 ${name} 没有可加载的浏览器包`)
     }
     for (const dep of manifest.dsh.client.inject ?? []) {
-      if (typeof dep === 'string' && dep.startsWith('@deepseek-ai/')) pending.push(dep)
+      if (typeof dep !== 'string' || !dep.startsWith('@deepseek-ai/')) continue
+      // inject 里可能列的是纯库包（例如 ui-primitives），没有浏览器包，
+      // 只作为别人的构建依赖存在，不能当客户端插件单独加载。
+      const depManifest = peekManifest(require, dep)
+      if (depManifest?.dsh?.client?.platform === 'web' && clientBundle(depManifest) !== undefined) {
+        pending.push(dep)
+      }
     }
     tasks.push(settle(loader.create({ name }), name))
   }
@@ -82,17 +95,54 @@ export async function startClientHost(): Promise<ClientHost> {
 
   const shellPkg = require.resolve('@deepseek-ai/dsh-web-frontend/package.json')
   const shellRoot = resolve(dirname(shellPkg), 'dist')
+  // 模型密钥由平台保管，不走官方 DeepSeek 首启配 Key 弹窗。
   const indexHtml = renderIndexInjections(
     readFileSync(resolve(shellRoot, 'index.html'), 'utf8'),
-    bootInjections(graph),
+    [
+      // 客户端 boot 之前先装传输适配：unary Remote 走 `P/remote`，逻辑流走
+      // `P/sse`，页面不再建立全局 WebSocket。脚本按内容哈希的静态资产下发，
+      // 不内联进 HTML。
+      { kind: 'script-src', placement: 'head', src: bootAsset('transport').url },
+      ...bootInjections(graph),
+      {
+        kind: 'global',
+        name: '__DSH_MODELS_ONBOARDING__',
+        value: { credentialOnboarding: false },
+      },
+      // 侧边栏底部自带的「设置」入口由左下角头像菜单取代。
+      // 官方设置改成右侧页面：不盖住左侧菜单；设置里的「通用设置 / 模型」导航保留。
+      {
+        kind: 'style',
+        text: [
+          '[class*="_settingsArea"]{display:none!important}',
+          // 不要再写 inset:auto，会把同规则里的 top/left 一并冲掉；用 inset 一次钉死右侧铺满。
+          // overlay 本身不接事件，只让设置面板接，避免透明层挡住左侧菜单。
+          'body>div:has([data-shortcut-modal="settings"]){position:fixed!important;inset:0 0 0 var(--dsh-platform-sidebar-width,280px)!important;width:auto!important;height:auto!important;align-items:stretch!important;justify-content:stretch!important;display:flex!important;transform:none!important;pointer-events:none!important}',
+          'body>div:has([data-shortcut-modal="settings"]) [class*="_mask"]{display:none!important;pointer-events:none!important}',
+          'body>div:has([data-shortcut-modal="settings"]) [data-shortcut-modal="settings"]{width:100%!important;max-width:none!important;height:100%!important;max-height:none!important;border-radius:0!important;box-shadow:none!important;margin:0!important;pointer-events:auto!important}',
+        ].join(''),
+      },
+      // 平台自己的 Skills / MCP 配置页；账号菜单负责打开。
+      { kind: 'html', placement: 'body', html: platformConsole() },
+      // 设置 → 模型：抄上游样式，数据对接平台 /settings/model。
+      { kind: 'html', placement: 'body', html: platformModelSettings() },
+      // 侧边栏工作区标题旁的「新增工作区」入口：名称 + 选择 Skills / MCP。
+      { kind: 'html', placement: 'body', html: workspaceCreate() },
+      // 右侧文件树的页头上传按钮：文件直接写进工作区的对象前缀。
+      { kind: 'html', placement: 'body', html: filesUpload() },
+      // DSH 客户端没有账号入口，登录身份由平台补充在侧边栏左下角。
+      { kind: 'html', placement: 'body', html: userBadge() },
+    ],
   )
 
   return {
     indexHtml,
     shellRoot,
-    fetchPlugin: (url, method, headers) => {
-      if (!url.startsWith('/plugins/') && url !== '/plugins') return Promise.resolve(undefined)
-      return registry.fetchBundle(new Request(`http://dsh.local${url}`, { method, headers }))
+    fetchPlugin: async (url, method, headers) => {
+      if (!url.startsWith('/plugins/') && url !== '/plugins') return undefined
+      const response = await registry.fetchBundle(new Request(`http://dsh.local${url}`, { method, headers }))
+      // 上游设置页会挂「打开配置文件」按钮；平台部署里它指向脑宿主的配置文件。
+      return patchPluginResponse(response, method)
     },
   }
 }
@@ -110,6 +160,15 @@ function readManifest(require: NodeJS.Require, name: string): PackageManifest {
     throw new Error(`客户端包 ${name} 的浏览器包不在磁盘上`)
   }
   return manifest
+}
+
+/** 只看清单，不校验浏览器包；用于区分客户端插件和纯库依赖。 */
+function peekManifest(require: NodeJS.Require, name: string): PackageManifest | undefined {
+  try {
+    return JSON.parse(readFileSync(require.resolve(`${name}/package.json`), 'utf8')) as PackageManifest
+  } catch {
+    return undefined
+  }
 }
 
 function clientBundle(manifest: PackageManifest): string | undefined {

@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { HttpError } from './errors.js'
 import type { AppConfig } from '../config.js'
 import type { Db } from './db.js'
@@ -39,7 +39,7 @@ interface CompiledRoute extends Route {
   pattern: RegExp
 }
 
-export function startHttp(cfg: AppConfig, db: Db, routes: Route[], surface: ClientSurface): void {
+export function startHttp(cfg: AppConfig, db: Db, routes: Route[], surface: ClientSurface): Server {
   const compiled = routes.map(compile)
   const server = createServer((req, res) => {
     void (async () => {
@@ -47,8 +47,10 @@ export function startHttp(cfg: AppConfig, db: Db, routes: Route[], surface: Clie
       await dispatch(cfg, db, compiled, req, res)
     })()
   })
-  server.on('upgrade', (req, socket, head) => surface.upgrade(req, socket, head))
+  // 平台没有 Upgrade 面：客户端所有逻辑流都走统一前缀下的 SSE。未注册
+  // `upgrade` 监听时 Node 会直接断开（非 101），不会把浏览器放进任何隧道。
   server.listen(cfg.http.port, cfg.http.host)
+  return server
 }
 
 async function dispatch(cfg: AppConfig, db: Db, routes: CompiledRoute[], req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -66,7 +68,14 @@ async function dispatch(cfg: AppConfig, db: Db, routes: CompiledRoute[], req: In
     send(res, hits.length ? 405 : 404, { code: 1, msg: hits.length ? 'method-not-allowed' : 'not-found', data: null })
     return
   }
-  const params = readParams(route, path)
+  let params: Record<string, string>
+  try {
+    params = readParams(route, path)
+  } catch {
+    // 畸形百分号编码不该变成 500；路径参数不合法就是坏请求。
+    send(res, 400, { code: 1, msg: 'invalid-path', data: null })
+    return
+  }
   const ctx: RequestCtx = {
     req,
     res,

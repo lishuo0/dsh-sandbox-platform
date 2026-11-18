@@ -3,6 +3,7 @@ import { HttpError } from '../../kernel/errors.js'
 import type { Querier } from '../../kernel/db.js'
 import { fileObjectKey } from '../../kernel/layout.js'
 import type { ObjectStore } from '../../kernel/objects.js'
+import { asNumber } from '../../kernel/row.js'
 
 export async function saveAttachment(
   db: Querier,
@@ -33,13 +34,17 @@ export async function listAttachments(db: Querier, userId: string) {
     `SELECT id, name, media_type, bytes, created_at FROM dsh_attachments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`,
     [userId],
   )
-  return rows.rows
+  return rows.rows.map((row) => {
+    const value = row as { bytes: unknown }
+    return { ...value, bytes: asNumber(value.bytes) }
+  })
 }
 
 /** 核对附件属于这个用户，并写成消息里的引用。字节留在共享存储。 */
 export async function noteFor(db: Querier, userId: string, ids: string[]): Promise<string> {
   if (!ids.length) return ''
-  const rows = await db.query(`SELECT id, name FROM dsh_attachments WHERE user_id = $1 AND id = ANY($2::text[])`, [userId, ids])
+  const placeholders = ids.map((_, index) => `$${index + 2}`).join(', ')
+  const rows = await db.query(`SELECT id, name FROM dsh_attachments WHERE user_id = $1 AND id IN (${placeholders})`, [userId, ...ids])
   if (rows.rowCount !== ids.length) throw new HttpError(404, 'attachment-not-found')
   const lines = rows.rows.map((row) => `- ${(row as { name: string }).name} ${(row as { id: string }).id}`)
   return `\n\n[attachments]\n${lines.join('\n')}`

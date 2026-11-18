@@ -1,7 +1,7 @@
 import type { Deps } from '../../app/deps.js'
 import type { Route } from '../../kernel/http.js'
 import { signToken } from '../../kernel/tokens.js'
-import { authenticate, createMember, ensureAdmin, listMembers, updateMember, type MemberPatch } from './service.js'
+import { authenticate, createMember, ensureAdmin, listMembers, setMemberRole, updateMember, type MemberPatch } from './service.js'
 
 export function identityRoutes(deps: Deps): Route[] {
   return [
@@ -44,6 +44,14 @@ export function identityRoutes(deps: Deps): Route[] {
     },
     {
       method: 'GET',
+      path: '/me',
+      auth: 'member',
+      handle: async (ctx) => {
+        ctx.send(200, { code: 0, msg: 'ok', data: { user_id: ctx.actor!.id, display_name: ctx.actor!.displayName } })
+      },
+    },
+    {
+      method: 'GET',
       path: '/admin/users',
       auth: 'admin',
       handle: async (ctx) => ctx.send(200, { code: 0, msg: 'ok', data: await listMembers(deps.db) }),
@@ -61,6 +69,16 @@ export function identityRoutes(deps: Deps): Route[] {
           role: body.role === 'admin' ? 'admin' : 'member',
         })
         ctx.send(201, { code: 0, msg: 'ok', data: member })
+      },
+    },
+    {
+      method: 'PATCH',
+      path: '/admin/users/:id/role',
+      auth: 'admin',
+      handle: async (ctx) => {
+        const body = await ctx.json<{ role?: unknown }>()
+        const updated = await setMemberRole(deps.db, ctx.actor!.id, ctx.params.id, body.role)
+        ctx.send(200, { code: 0, msg: 'ok', data: updated })
       },
     },
     {

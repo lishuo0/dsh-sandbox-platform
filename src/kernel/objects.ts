@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve } from 'node:path'
 import type { AppConfig } from '../config.js'
 
@@ -14,10 +14,24 @@ export interface ObjectPage {
   truncated: boolean
 }
 
+export interface PutOptions {
+  /** 只新增：键已存在时抛 {@link ObjectExistsError}，绝不覆盖。 */
+  ifAbsent?: boolean
+}
+
+/** 原子新增时遇到已存在的键。 */
+export class ObjectExistsError extends Error {
+  constructor(key: string) {
+    super(`对象已存在：${key}`)
+    this.name = 'ObjectExistsError'
+  }
+}
+
 export interface ObjectStore {
   enabled(): boolean
-  put(key: string, body: Buffer, contentType?: string): Promise<void>
+  put(key: string, body: Buffer, contentType?: string, options?: PutOptions): Promise<void>
   get(key: string): Promise<Buffer | undefined>
+  delete(key: string): Promise<void>
   list(prefix: string): Promise<ObjectPage>
 }
 
@@ -35,7 +49,12 @@ class OssStore implements ObjectStore {
     return Boolean(oss.endpoint && oss.bucket && oss.accessKeyId && oss.accessKeySecret)
   }
 
-  async put(key: string, body: Buffer, contentType = 'application/octet-stream'): Promise<void> {
+  async put(
+    key: string,
+    body: Buffer,
+    contentType = 'application/octet-stream',
+    options: PutOptions = {},
+  ): Promise<void> {
     this.requireReady()
     const object = cleanKey(key)
     const date = new Date().toUTCString()
@@ -46,10 +65,13 @@ class OssStore implements ObjectStore {
         Date: date,
         'Content-Type': contentType,
         'Content-MD5': md5,
+        // OSS 的原子新增：同名对象已存在时返回 409 而不是覆盖。
+        ...(options.ifAbsent ? { 'x-oss-forbid-overwrite': 'true' } : {}),
         Authorization: this.auth(`PUT\n${md5}\n${contentType}\n${date}\n/${this.cfg.aliyun.oss.bucket}/${object}`),
       },
       body: bytesOf(body),
     })
+    if (options.ifAbsent && response.status === 409) throw new ObjectExistsError(object)
     if (!response.ok) throw new Error(`对象写入失败 ${response.status}`)
   }
 
@@ -67,6 +89,20 @@ class OssStore implements ObjectStore {
     if (response.status === 404) return undefined
     if (!response.ok) throw new Error(`对象读取失败 ${response.status}`)
     return Buffer.from(await response.arrayBuffer())
+  }
+
+  async delete(key: string): Promise<void> {
+    this.requireReady()
+    const object = cleanKey(key)
+    const date = new Date().toUTCString()
+    const response = await fetch(objectUrl(this.cfg, object), {
+      method: 'DELETE',
+      headers: {
+        Date: date,
+        Authorization: this.auth(`DELETE\n\n\n${date}\n/${this.cfg.aliyun.oss.bucket}/${object}`),
+      },
+    })
+    if (!response.ok && response.status !== 404) throw new Error(`对象删除失败 ${response.status}`)
   }
 
   async list(prefix: string): Promise<ObjectPage> {
@@ -106,10 +142,20 @@ class LocalStore implements ObjectStore {
     return true
   }
 
-  async put(key: string, body: Buffer): Promise<void> {
+  async put(key: string, body: Buffer, _contentType?: string, options: PutOptions = {}): Promise<void> {
     const file = this.confine(key)
     await mkdir(dirname(file), { recursive: true })
-    await writeFile(file, body)
+    if (options.ifAbsent !== true) {
+      await writeFile(file, body)
+      return
+    }
+    try {
+      // `wx` 是本机的原子新增，和 OSS 的 forbid-overwrite 同义。
+      await writeFile(file, body, { flag: 'wx' })
+    } catch (error) {
+      if (isExists(error)) throw new ObjectExistsError(cleanKey(key))
+      throw error
+    }
   }
 
   async get(key: string): Promise<Buffer | undefined> {
@@ -117,6 +163,15 @@ class LocalStore implements ObjectStore {
       return await readFile(this.confine(key))
     } catch (error) {
       if (isMissing(error)) return undefined
+      throw error
+    }
+  }
+
+  async delete(key: string): Promise<void> {
+    try {
+      await unlink(this.confine(key))
+    } catch (error) {
+      if (isMissing(error)) return
       throw error
     }
   }
@@ -151,6 +206,10 @@ class LocalStore implements ObjectStore {
 
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT'
+}
+
+function isExists(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'EEXIST'
 }
 
 function bytesOf(body: Buffer): ArrayBuffer {

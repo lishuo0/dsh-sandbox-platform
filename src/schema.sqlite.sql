@@ -1,0 +1,276 @@
+-- 本地 SQLite 版 schema。列语义与 schema.sql 相同：
+-- jsonb → text、text[] → text（存 JSON）、bytea → blob、boolean → integer、timestamptz → text。
+
+CREATE TABLE IF NOT EXISTS dsh_users (
+  id text PRIMARY KEY,
+  display_name text NOT NULL,
+  password_hash text NOT NULL,
+  role text NOT NULL DEFAULT 'member',
+  status text NOT NULL DEFAULT 'active',
+  skills_volume text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS dsh_user_models (
+  user_id text PRIMARY KEY REFERENCES dsh_users(id) ON DELETE CASCADE,
+  base_url text NOT NULL,
+  api text NOT NULL DEFAULT 'openai-completions',
+  model_ids text NOT NULL,
+  default_model text NOT NULL,
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- 一个成员可配多个模型提供商；密钥在 dsh_user_credentials，name = 本表 id。
+CREATE TABLE IF NOT EXISTS dsh_user_model_providers (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  display_name text NOT NULL DEFAULT '',
+  base_url text NOT NULL,
+  api text NOT NULL DEFAULT 'openai-completions',
+  model_ids text NOT NULL,
+  default_model text NOT NULL,
+  sort_order integer NOT NULL DEFAULT 0,
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS dsh_user_model_providers_user
+  ON dsh_user_model_providers (user_id, sort_order, id);
+
+CREATE TABLE IF NOT EXISTS dsh_user_credentials (
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  name text NOT NULL,
+  ciphertext blob NOT NULL,
+  key_version integer NOT NULL DEFAULT 1,
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (user_id, kind, name)
+);
+
+CREATE TABLE IF NOT EXISTS dsh_workspaces (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  host_root text NOT NULL,
+  guest_root text NOT NULL,
+  volume_name text,
+  state text NOT NULL DEFAULT 'active',
+  is_default integer NOT NULL DEFAULT 0,
+  -- 成员手动拖拽后的显示顺序；0 表示没调过，沿用「默认工作区优先、最近活跃优先」。
+  sort_order integer NOT NULL DEFAULT 0,
+  -- 0 表示没配置过（沿用「全部启用」的旧行为）；1 时下面两张表就是权威列表，
+  -- 允许为空——空表示这个工作区不接入任何 Skill / MCP。
+  selection_configured integer NOT NULL DEFAULT 0,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  last_active_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- 每个成员最多一个默认工作区；没带工作区的会话落到它上面。
+CREATE UNIQUE INDEX IF NOT EXISTS dsh_workspaces_default ON dsh_workspaces (user_id) WHERE is_default;
+
+-- 工作区明确选择的技能；技能按 (name, scope) 引用，公开技能人人可选。
+CREATE TABLE IF NOT EXISTS dsh_workspace_skills (
+  workspace_id text NOT NULL REFERENCES dsh_workspaces(id) ON DELETE CASCADE,
+  skill_name text NOT NULL,
+  skill_scope text NOT NULL CHECK (skill_scope IN ('private', 'public')),
+  PRIMARY KEY (workspace_id, skill_name, skill_scope)
+);
+
+-- 工作区明确选择的 MCP server；规则与技能一致。
+CREATE TABLE IF NOT EXISTS dsh_workspace_mcp_servers (
+  workspace_id text NOT NULL REFERENCES dsh_workspaces(id) ON DELETE CASCADE,
+  server_name text NOT NULL,
+  server_scope text NOT NULL CHECK (server_scope IN ('private', 'public')),
+  PRIMARY KEY (workspace_id, server_name, server_scope)
+);
+
+-- 会话必须挂在某块工作区上；平台在写入、建会话、启动回填时保证 workspace_id 非空。
+-- 列仍允许 NULL，是因为老库无法原地收紧：读到 NULL 会补到成员默认工作区。
+CREATE TABLE IF NOT EXISTS dsh_sessions (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  workspace_id text REFERENCES dsh_workspaces(id) ON DELETE SET NULL,
+  preset_id text,
+  title text,
+  status text NOT NULL DEFAULT 'active',
+  model_id text,
+  -- 工作区内的手动顺序与置顶；0 / NULL 表示沿用「最近创建优先」。
+  sort_order integer NOT NULL DEFAULT 0,
+  pinned_at text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  last_active_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS dsh_platform_session_ops (
+  session_id text PRIMARY KEY REFERENCES dsh_sessions(id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  state text NOT NULL,
+  error_code text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS dsh_platform_message_requests (
+  session_id text NOT NULL REFERENCES dsh_sessions(id) ON DELETE CASCADE,
+  request_id text NOT NULL,
+  user_id text NOT NULL,
+  digest text NOT NULL,
+  state text NOT NULL,
+  error_code text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (session_id, request_id)
+);
+
+-- 平台是唯一的排队者：会话的待发送消息只存在这里，不写进脑的 inbox。
+CREATE TABLE IF NOT EXISTS dsh_session_queue (
+  session_id text NOT NULL REFERENCES dsh_sessions(id) ON DELETE CASCADE,
+  item_id text NOT NULL,
+  request_id text NOT NULL,
+  user_id text NOT NULL,
+  content text NOT NULL,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (session_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS dsh_session_queue_order_idx
+  ON dsh_session_queue (session_id, created_at);
+
+-- 脑写、平台只读。DDL 与 dsh-sandbox-brain/src/schema.sqlite.sql 保持一致；
+-- 平台用它推导标题、blank/running 和历史页，所以平台侧也要能建出这张表。
+CREATE TABLE IF NOT EXISTS dsh_session_events (
+  session_id text NOT NULL,
+  seq integer NOT NULL,
+  event text NOT NULL,
+  PRIMARY KEY (session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS dsh_skills (
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  description text NOT NULL,
+  scope text NOT NULL DEFAULT 'private' CHECK (scope IN ('private', 'public')),
+  group_id text,
+  enabled integer NOT NULL DEFAULT 1,
+  revision integer NOT NULL DEFAULT 1,
+  bytes integer NOT NULL DEFAULT 0,
+  file_count integer NOT NULL DEFAULT 0,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (user_id, name)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS dsh_skills_public_name ON dsh_skills (name) WHERE scope = 'public';
+
+-- 技能 / MCP 分组：平台自己的组织方式，成员按 group_id 归属；
+-- 工作区选中的分组会把成员展开到 dsh_workspace_skills / dsh_workspace_mcp_servers，
+-- 脑仍然只读那两张表。
+CREATE TABLE IF NOT EXISTS dsh_skill_groups (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  description text NOT NULL DEFAULT '',
+  visibility text NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS dsh_mcp_groups (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  description text NOT NULL DEFAULT '',
+  visibility text NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS dsh_workspace_skill_groups (
+  workspace_id text NOT NULL REFERENCES dsh_workspaces(id) ON DELETE CASCADE,
+  group_id text NOT NULL,
+  PRIMARY KEY (workspace_id, group_id)
+);
+
+CREATE TABLE IF NOT EXISTS dsh_workspace_mcp_groups (
+  workspace_id text NOT NULL REFERENCES dsh_workspaces(id) ON DELETE CASCADE,
+  group_id text NOT NULL,
+  PRIMARY KEY (workspace_id, group_id)
+);
+
+CREATE TABLE IF NOT EXISTS dsh_mcp_servers (
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  server_name text NOT NULL,
+  transport text NOT NULL,
+  target text NOT NULL,
+  config text NOT NULL DEFAULT '{}',
+  scope text NOT NULL DEFAULT 'private' CHECK (scope IN ('private', 'public')),
+  group_id text,
+  enabled integer NOT NULL DEFAULT 1,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (user_id, server_name)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS dsh_mcp_servers_public_name
+  ON dsh_mcp_servers (server_name) WHERE scope = 'public';
+
+CREATE TABLE IF NOT EXISTS dsh_schedule_tasks (
+  id text PRIMARY KEY,
+  session_id text NOT NULL,
+  title text NOT NULL,
+  prompt text NOT NULL,
+  kind text NOT NULL,
+  rule text NOT NULL,
+  generation integer NOT NULL DEFAULT 1,
+  status text NOT NULL,
+  desired_at text NOT NULL,
+  next_run_at text NOT NULL,
+  lease_owner text,
+  lease_until text,
+  last_request_id text,
+  last_delivery text,
+  attempt_count integer NOT NULL DEFAULT 0,
+  pending_occurrence text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS dsh_schedule_tasks_due_idx
+  ON dsh_schedule_tasks (next_run_at)
+  WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS dsh_attachments (
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  id text NOT NULL,
+  name text NOT NULL,
+  media_type text NOT NULL,
+  bytes integer NOT NULL,
+  object_key text NOT NULL,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (user_id, id)
+);
+
+-- 从脑写的 dsh_session_events 投影出来的计价用量。平台只写这张表和游标。
+CREATE TABLE IF NOT EXISTS dsh_usage_steps (
+  session_id text NOT NULL,
+  seq integer NOT NULL,
+  user_id text NOT NULL,
+  workspace_id text NOT NULL,
+  at text NOT NULL,
+  provider text NOT NULL DEFAULT '',
+  model text NOT NULL DEFAULT '',
+  input_tokens integer NOT NULL DEFAULT 0,
+  cache_read_tokens integer NOT NULL DEFAULT 0,
+  cache_write_tokens integer NOT NULL DEFAULT 0,
+  output_tokens integer NOT NULL DEFAULT 0,
+  price_version text,
+  amount real,
+  PRIMARY KEY (session_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS dsh_usage_steps_user_at
+  ON dsh_usage_steps (user_id, at);
+
+CREATE TABLE IF NOT EXISTS dsh_usage_cursors (
+  session_id text PRIMARY KEY,
+  seq integer NOT NULL DEFAULT 0
+);
