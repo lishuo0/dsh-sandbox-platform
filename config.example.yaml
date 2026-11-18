@@ -1,0 +1,61 @@
+# 平台唯一配置。数据库、阿里云沙箱、OSS 都写在这里。
+# 用法：复制为 config.yaml，留空项会在 ./scripts/dev.sh 首次启动时自动生成。
+# 沙箱密钥和 OSS 留空时，文件写到本项目 var/objects，脑的本地沙箱读同一份。
+#
+# 数据库：不写这一段就用本地 SQLite（自动创建 var/dsh.sqlite），
+# 不需要安装数据库，也不需要 Docker；脑的配置默认指向同一个文件。
+# 要接 PostgreSQL（部署、多副本、共享库）时写 url：
+# database:
+#   url: postgres://dsh:dsh@localhost:5432/dsh
+# 想换 SQLite 文件位置时写 file（相对本项目根）：
+# database:
+#   file: var/dsh.sqlite
+
+database: {}
+
+aliyun:
+  sandbox:
+    apiKey: ""
+    apiUrl: https://api.cn-beijing.sandbox.aliyuncs.com
+    domain: cn-beijing.sandbox.aliyuncs.com
+    template: ""
+    roleArn: ""
+  oss:
+    region: cn-beijing
+    endpoint: ""
+    bucket: ""
+    accessKeyId: ""
+    accessKeySecret: ""
+
+http:
+  host: 0.0.0.0
+  port: 3000
+
+# tokenSecret / adminPassword / credentialsKey / appKey 留空时由 dev.sh 生成并写回。
+auth:
+  tokenSecret: ""
+  tokenTtlHours: 168
+  adminUsername: admin
+  adminPassword: ""
+
+# 32 字节密钥的 base64。模型 Key 和 MCP 请求头用它加密。脑的配置里必须是同一把。
+credentialsKey: ""
+
+brain:
+  baseUrl: http://127.0.0.1:8080
+  appId: platform
+  appKey: ""
+
+storage:
+  dir: var/objects
+
+# 上下文洞察的金额按这里的价目计算，单位是「美元 / 百万 token」。
+# 键按 `provider/model` 匹配，其次匹配 `model`，最后用 `*` 兜底；不配就只显示
+# token，不显示金额。金额在投影当时算好，之后改价不影响旧账。
+# pricing:
+#   models:
+#     user/deepseek-chat:
+#       input: 0.27
+#       cacheRead: 0.07
+#       cacheWrite: 0.27
+#       output: 1.1
