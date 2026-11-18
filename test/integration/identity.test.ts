@@ -60,19 +60,32 @@ describe('健康检查与登录', () => {
 })
 
 describe('账号管理', () => {
+  let bobToken = ''
+
   it('管理员查看 / 创建 / 修改成员', async () => {
     const mine = await api<{ userId: string; displayName: string; role: string }>(platform.baseUrl, '/auth/me', {
       token: admin,
     })
     expect(mine.body.data).toMatchObject({ userId: 'admin', role: 'admin' })
 
-    const created = await api<{ id: string; role: string }>(platform.baseUrl, '/admin/users', {
-      method: 'POST',
-      token: admin,
-      body: { username: 'alice', displayName: '爱丽丝', password: 'alice-password-123', role: 'member' },
-    })
+    const created = await api<{ member: { id: string; role: string; mustChangePassword: boolean }; initialPassword?: string }>(
+      platform.baseUrl,
+      '/admin/users',
+      {
+        method: 'POST',
+        token: admin,
+        body: { username: 'alice', displayName: '爱丽丝', password: 'alice-password-123', role: 'member' },
+      },
+    )
     expect(created.status).toBe(201)
-    expect(created.body.data).toMatchObject({ id: 'alice', displayName: '爱丽丝', role: 'member' })
+    expect(created.body.data.member).toMatchObject({
+      id: 'alice',
+      displayName: '爱丽丝',
+      role: 'member',
+      mustChangePassword: true,
+    })
+    // 管理员指定了初始口令就不再回传；成员首次登录要自己改。
+    expect(created.body.data.initialPassword).toBeUndefined()
 
     const list = await api<Array<{ id: string }>>(platform.baseUrl, '/admin/users', { token: admin })
     expect(list.body.data.map((member) => member.id)).toContain('alice')
@@ -95,8 +108,8 @@ describe('账号管理', () => {
       token: admin,
       body: { username: 'bob', password: 'bob-password-1234' },
     })
-    const bob = await login(platform.baseUrl, 'bob', 'bob-password-1234')
-    const response = await api(platform.baseUrl, '/admin/users', { token: bob })
+    bobToken = await login(platform.baseUrl, 'bob', 'bob-password-1234')
+    const response = await api(platform.baseUrl, '/admin/users', { token: bobToken })
     expect(response.status).toBe(403)
   })
 
@@ -133,7 +146,7 @@ describe('账号管理', () => {
     expect(badStatus.body.msg).toBe('invalid-status')
   })
 
-  it('不能停用最后一个管理员', async () => {
+  it('不能停用最后一个管理员（先被自我保护挡住）', async () => {
     // alice 也被提升成管理员了，先降回成员，只剩 admin。
     await api(platform.baseUrl, '/admin/users/alice', { method: 'PATCH', token: admin, body: { role: 'member' } })
     const response = await api(platform.baseUrl, '/admin/users/admin', {
@@ -141,15 +154,15 @@ describe('账号管理', () => {
       token: admin,
       body: { status: 'disabled' },
     })
-    expect(response.status).toBe(409)
-    expect(response.body.msg).toBe('last-admin')
+    // 自己是当前操作者：先命中「不能停用自己」；last-admin 由服务层单测覆盖。
+    expect(response.status).toBe(422)
+    expect(response.body.msg).toBe('cannot-disable-self')
   })
 
   it('停用后旧令牌失效', async () => {
-    // bob 已有令牌；管理员停用它。
-    const bob = await login(platform.baseUrl, 'bob', 'bob-password-1234')
+    // bob 已在上一用例拿到令牌；管理员停用它。
     await api(platform.baseUrl, '/admin/users/bob', { method: 'PATCH', token: admin, body: { status: 'disabled' } })
-    const response = await api(platform.baseUrl, '/auth/me', { token: bob })
+    const response = await api(platform.baseUrl, '/auth/me', { token: bobToken })
     expect(response.status).toBe(401)
   })
 })

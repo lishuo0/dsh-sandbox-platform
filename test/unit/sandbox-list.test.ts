@@ -97,4 +97,31 @@ describe('listSandboxes', () => {
     expect((await listSandboxes(db, { pageSize: 500 })).page_size).toBe(100)
     expect((await listSandboxes(db, { page: 9 })).items).toEqual([])
   })
+
+  it('按登录名和状态过滤，总数跟着过滤条件走', async () => {
+    await createSandboxTable()
+    await db.query(`INSERT INTO dsh_users (id, display_name, password_hash) VALUES ('u2', '二', 'x')`)
+    await addSandbox('sbx-a', 'w1', 's_a', '2026-01-01T00:00:00Z', 'ready')
+    await addSandbox('sbx-b', 'w1', 's_b', '2026-01-02T00:00:00Z', 'paused')
+    await db.query(
+      `INSERT INTO dsh_sandboxes (user_id, workspace_id, session_id, scope, sandbox_id, external_id, endpoint, workspace_root, state, expires_at, last_used_at)
+       VALUES ('u2', 'w2', 's_c', 'workspace', 'sbx-c', 'sbx-c', 'https://sbx-c.e2b.test', '/desk', 'ready', '2026-04-01T00:00:00Z', '2026-01-03T00:00:00Z')`,
+    )
+
+    const byUser = await listSandboxes(db, { userId: 'u2' })
+    expect(byUser.total).toBe(1)
+    expect(byUser.items.map((item) => item.sandbox_id)).toEqual(['sbx-c'])
+    expect(byUser.items[0]).toMatchObject({ user_display_name: '二' })
+
+    const byState = await listSandboxes(db, { state: 'ready' })
+    expect(byState.total).toBe(2)
+    expect(byState.items.map((item) => item.sandbox_id)).toEqual(['sbx-c', 'sbx-a'])
+
+    const combined = await listSandboxes(db, { userId: 'u1', state: 'paused' })
+    expect(combined.total).toBe(1)
+    expect(combined.items.map((item) => item.sandbox_id)).toEqual(['sbx-b'])
+
+    // 空字符串当没传，和路由里的 `?? undefined` 对齐。
+    expect((await listSandboxes(db, { userId: '', state: '' })).total).toBe(3)
+  })
 })

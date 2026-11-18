@@ -30,10 +30,11 @@ afterEach(async () => {
 
 describe('setMemberRole', () => {
   it('把成员升成管理员并回最新视图', async () => {
-    expect(await setMemberRole(db, 'root', 'ivy', 'admin')).toEqual({
+    expect(await setMemberRole(db, 'root', 'ivy', 'admin')).toMatchObject({
       id: 'ivy',
       displayName: '常春藤',
       role: 'admin',
+      mustChangePassword: false,
       status: 'active',
     })
     const rows = await db.query<{ role: string }>(`SELECT role FROM dsh_users WHERE id = 'ivy'`)

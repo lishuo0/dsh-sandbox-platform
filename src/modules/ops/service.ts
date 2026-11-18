@@ -29,23 +29,36 @@ export interface AdminSandboxPage {
 /** 管理员排障面：只读共享库里的沙箱注册表，不碰会话内容。 */
 export async function listSandboxes(
   db: Querier,
-  options: { page?: number; pageSize?: number } = {},
+  options: { page?: number; pageSize?: number; userId?: string; state?: string } = {},
 ): Promise<AdminSandboxPage> {
   const page = Math.max(1, Math.trunc(options.page ?? 1) || 1)
   const requested = Math.trunc(options.pageSize ?? DEFAULT_PAGE_SIZE) || DEFAULT_PAGE_SIZE
   const pageSize = requested < 1 ? DEFAULT_PAGE_SIZE : Math.min(requested, MAX_PAGE_SIZE)
+  const filters: string[] = []
+  const params: unknown[] = []
+  if (typeof options.userId === 'string' && options.userId !== '') {
+    params.push(options.userId)
+    filters.push(`s.user_id = $${params.length}`)
+  }
+  if (typeof options.state === 'string' && options.state !== '') {
+    params.push(options.state)
+    filters.push(`s.state = $${params.length}`)
+  }
+  const where = filters.length === 0 ? '' : ` WHERE ${filters.join(' AND ')}`
+  const limitIndex = params.length + 1
+  const offsetIndex = params.length + 2
   try {
-    const total = await db.query<{ total: unknown }>(`SELECT count(*) AS total FROM dsh_sandboxes`)
+    const total = await db.query<{ total: unknown }>(`SELECT count(*) AS total FROM dsh_sandboxes s${where}`, params)
     const rows = await db.query(
       `SELECT s.sandbox_id, s.user_id, COALESCE(u.display_name, '') AS user_display_name,
               s.workspace_id, COALESCE(w.name, '') AS workspace_name, s.session_id,
               s.scope, s.platform, s.state, s.endpoint, s.last_used_at, s.expires_at
          FROM dsh_sandboxes s
          LEFT JOIN dsh_users u ON u.id = s.user_id
-         LEFT JOIN dsh_workspaces w ON w.id = s.workspace_id
+         LEFT JOIN dsh_workspaces w ON w.id = s.workspace_id${where}
         ORDER BY s.last_used_at DESC, s.sandbox_id
-        LIMIT $1 OFFSET $2`,
-      [pageSize, (page - 1) * pageSize],
+        LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
+      [...params, pageSize, (page - 1) * pageSize],
     )
     return {
       items: rows.rows.map((row) => ({

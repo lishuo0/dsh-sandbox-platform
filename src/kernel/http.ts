@@ -5,7 +5,9 @@ import type { Db } from './db.js'
 import type { ClientSurface } from '../client/surface.js'
 import { currentUser } from '../client/surface.js'
 
-export const API_PREFIX = '/dsh-api/platform/v1'
+export { API_PREFIX, MUST_CHANGE_ALLOWED } from './access.js'
+import { API_PREFIX, MUST_CHANGE_ALLOWED } from './access.js'
+
 const JSON_LIMIT = 1_000_000
 const RAW_LIMIT = 64 * 1024 * 1024
 
@@ -14,6 +16,8 @@ export interface Actor {
   displayName: string
   role: 'admin' | 'member'
   status: string
+  /** 管理员开户 / 重置密码后为真；客户端据此强制弹改密框。 */
+  mustChangePassword: boolean
 }
 
 export interface RequestCtx {
@@ -96,6 +100,10 @@ async function dispatch(cfg: AppConfig, db: Db, routes: CompiledRoute[], req: In
         send(res, 403, { code: 1, msg: 'forbidden', data: null })
         return
       }
+      if (ctx.actor.mustChangePassword && !(MUST_CHANGE_ALLOWED as readonly string[]).includes(path)) {
+        send(res, 403, { code: 1, msg: 'must-change-password', data: null })
+        return
+      }
     }
     await route.handle(ctx)
   } catch (error) {
@@ -139,14 +147,20 @@ function readParams(route: CompiledRoute, path: string): Record<string, string> 
 async function actorOf(cfg: AppConfig, db: Db, req: IncomingMessage): Promise<Actor | undefined> {
   const userId = currentUser(cfg, req)
   if (!userId) return undefined
-  const rows = await db.query(`SELECT id, display_name, role, status FROM dsh_users WHERE id = $1`, [userId])
-  const row = rows.rows[0] as { id: string; display_name: string; role: string; status: string } | undefined
+  const rows = await db.query(
+    `SELECT id, display_name, role, status, must_change_password FROM dsh_users WHERE id = $1`,
+    [userId],
+  )
+  const row = rows.rows[0] as
+    | { id: string; display_name: string; role: string; status: string; must_change_password: unknown }
+    | undefined
   if (!row || row.status !== 'active') return undefined
   return {
     id: row.id,
     displayName: row.display_name,
     role: row.role === 'admin' ? 'admin' : 'member',
     status: row.status,
+    mustChangePassword: row.must_change_password === true || row.must_change_password === 1 || row.must_change_password === '1' || row.must_change_password === 't',
   }
 }
 

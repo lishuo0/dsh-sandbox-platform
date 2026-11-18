@@ -16,6 +16,13 @@
     'invalid-path': '文件路径不合法',
     'name-taken': '这个名字已被占用',
     'admin-only': '只有管理员可以管理公开内容',
+    'invalid-password': '当前密码不正确',
+    'password-too-short': '密码至少 6 位',
+    'username-taken': '登录名已被占用',
+    'invalid-username': '登录名只允许字母、数字和 . _ -',
+    'cannot-disable-self': '不能停用自己',
+    'cannot-demote-self': '不能取消自己的管理员角色',
+    'last-admin': '至少要保留一个启用状态的管理员',
     'missing-secret': '保留密钥时找不到原密钥，请重新填写',
     'file-too-large': '单个文件不能超过 32 MiB',
     'skill-too-large': '技能文件总量不能超过 64 MiB',
@@ -37,6 +44,16 @@
     fileListEl: null,
     saveButton: null,
     listScroll: 0,
+    /** 开户 / 重置密码后的一次性提示（含初始密码，只显示这一次）。 */
+    notice: '',
+    page: 1,
+    pageSize: 20,
+    total: 0,
+    sandboxUser: '',
+    sandboxState: '',
+    userQuery: '',
+    userRole: '',
+    userStatus: '',
   }
 
   let me = { id: '', role: 'member' }
@@ -44,6 +61,7 @@
 
   const bodyEl = document.getElementById('dsh-console-body')
   const errorEl = document.getElementById('dsh-console-error')
+  const noticeEl = document.getElementById('dsh-console-notice')
   const titleEl = document.getElementById('dsh-console-title')
   const subtitleEl = document.getElementById('dsh-console-subtitle')
   const createButton = document.getElementById('dsh-console-create')
@@ -51,6 +69,7 @@
   const saveButton = document.getElementById('dsh-console-save')
   const returnButton = document.getElementById('dsh-console-return')
   const backButton = document.getElementById('dsh-console-back')
+  const navEl = document.getElementById('dsh-console-nav')
   const mainEl = document.querySelector('#dsh-console .admin-page-main')
   state.saveButton = saveButton
 
@@ -80,10 +99,8 @@
   }
 
   // 左侧菜单入口：插进 DSH 自带的面板导航，和「新建会话」下面的面板行同级。
-  const SIDEBAR_MENU = [
-    { view: 'skills', label: 'Skills', icon: 'skills' },
-    { view: 'mcp', label: 'MCP', icon: 'mcp' },
-  ]
+  // 清单由服务端注入（console-views.ts），adminOnly 的项只在管理员身份下出现。
+  const SIDEBAR_MENU = __CONSOLE_VIEWS__
   let railObserver = null
 
   function iconNode(kind) {
@@ -104,6 +121,13 @@
     if (kind === 'skills') {
       add('path', { d: 'M5 4.5A1.5 1.5 0 0 1 6.5 3H18a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6.5A1.5 1.5 0 0 1 5 19.5z' })
       add('path', { d: 'M8 3v18M11 8h5M11 12h4' })
+    } else if (kind === 'users') {
+      add('circle', { cx: '9', cy: '8', r: '3.2' })
+      add('path', { d: 'M3.5 19.5c0-3.2 2.5-5.2 5.5-5.2s5.5 2 5.5 5.2' })
+      add('path', { d: 'M16 5.2a3 3 0 0 1 0 5.6M17.5 14.6c2.2.6 3.5 2.3 3.5 4.9' })
+    } else if (kind === 'sandbox') {
+      add('path', { d: 'M12 3l8 4.5v9L12 21l-8-4.5v-9z' })
+      add('path', { d: 'M12 12l8-4.5M12 12v9M12 12L4 7.5' })
     } else {
       add('rect', { x: '3', y: '4', width: '18', height: '6', rx: '1.5' })
       add('rect', { x: '3', y: '14', width: '18', height: '6', rx: '1.5' })
@@ -113,7 +137,7 @@
   }
 
   function syncMenuActive() {
-    for (const button of document.querySelectorAll('#dsh-console-menu [data-console-view]')) {
+    for (const button of document.querySelectorAll('#dsh-console-menu [data-console-view], #dsh-console-nav [data-console-view]')) {
       const active = root.dataset.open === 'true' && button.dataset.consoleView === state.view
       button.classList.toggle('active', active)
       if (active) button.setAttribute('aria-current', 'page')
@@ -131,16 +155,33 @@
     syncMenuActive()
   }
 
-  function installSidebarMenu() {
-    if (document.getElementById('dsh-console-menu')) {
+  /** 当前身份能打开的视图（含头像菜单里的「管理」子菜单）。 */
+  function visibleEntries() {
+    return SIDEBAR_MENU.filter((entry) => entry.adminOnly !== true || me.role === 'admin')
+  }
+
+  /** 侧栏一级菜单只放 Skills / MCP，管理员视图在头像菜单的「管理」里。 */
+  function menuEntries() {
+    return visibleEntries().filter((entry) => entry.menu === 'sidebar')
+  }
+
+  /** 「管理」页左栏只列头像菜单里的管理视图（用户 / 沙箱），Skills / MCP 不在里面。 */
+  function panelEntries() {
+    return visibleEntries().filter((entry) => entry.menu === 'account')
+  }
+
+  function installSidebarMenu(rebuild) {
+    const existing = document.getElementById('dsh-console-menu')
+    if (existing && rebuild !== true) {
       syncSidebarRail()
       return true
     }
     const sidebar = document.querySelector('[class*="sidebarCol"]')
     const nav = sidebar && (sidebar.querySelector('[class*="panelList"]') || sidebar.querySelector('nav'))
     if (!nav) return false
+    if (existing) existing.remove()
     const menu = el('div', { id: 'dsh-console-menu' })
-    for (const entry of SIDEBAR_MENU) {
+    for (const entry of menuEntries()) {
       const button = el('button', {
         type: 'button',
         'data-console-view': entry.view,
@@ -160,8 +201,28 @@
     return true
   }
 
+  /** 设置页同款左栏导航：只列用户 / 沙箱，点一行切一页。 */
+  function renderPanelNav() {
+    if (!navEl) return
+    navEl.textContent = ''
+    for (const entry of panelEntries()) {
+      const button = el('button', {
+        type: 'button',
+        role: 'tab',
+        'data-console-view': entry.view,
+        'aria-label': entry.label,
+      }, iconNode(entry.icon), el('span', { class: 'label', text: entry.label }))
+      button.addEventListener('click', () => {
+        if (!state.busy) void setView(entry.view)
+      })
+      navEl.append(button)
+    }
+    syncMenuActive()
+  }
+
+  // 先按当前身份画一版；拿到 /auth/me 之后再补管理员入口。
+  void loadMe().then(() => installSidebarMenu(true))
   // React 会重画侧栏；入口丢了自己补回去，其余时间不做任何事。
-  installSidebarMenu()
   let menuCheck = false
   const menuObserver = new MutationObserver(() => {
     if (menuCheck) return
@@ -169,6 +230,8 @@
     requestAnimationFrame(() => {
       menuCheck = false
       if (!document.getElementById('dsh-console-menu')) installSidebarMenu()
+      // 客户端重画 DOM 时把节点丢掉了：还开着就挂回 body。
+      if (root.dataset.open === 'true' && !root.isConnected) mountConsole()
     })
   })
   menuObserver.observe(document.body, { childList: true, subtree: true })
@@ -250,38 +313,110 @@
 
   // 列表页和新建 / 编辑页共用同一块中间栏：表单打开时列表整个让位，
   // 页头也跟着换成表单标题和「返回 / 保存」，不再在网格上方叠一张卡片。
+  const VIEW_HEAD = {
+    skills: {
+      title: 'Skills 管理',
+      subtitle: '创建自己的技能，或把技能公开给所有成员。公开人人可用，私有只有自己可用。',
+      create: '＋ 新建 Skill',
+    },
+    mcp: {
+      title: 'MCP 管理',
+      subtitle: '接入 HTTP MCP server；密钥由平台加密保存，脑侧按需解密。',
+      create: '＋ 新建 MCP',
+    },
+    users: {
+      title: '用户管理',
+      subtitle: '添加成员账号、重置密码、停用或调整角色。新账号首次登录必须修改初始密码。',
+      create: '＋ 新建用户',
+    },
+    sandboxes: {
+      title: '沙箱',
+      subtitle: '只读排障：显示共享库里最后一次已知状态，平台不直连 E2B，也不读会话内容。',
+      create: '',
+    },
+  }
+
   function syncHeader() {
     const form = state.form
-    const skills = state.view === 'skills'
     returnButton.hidden = !form
-    saveButton.hidden = !form
     refreshButton.hidden = Boolean(form)
-    createButton.hidden = Boolean(form)
     refreshButton.disabled = state.loading
     if (form) {
-      titleEl.textContent = form.mode === 'create'
-        ? (skills ? '新建 Skill' : '新建 MCP')
-        : (skills ? `编辑 Skill · ${form.name}` : `编辑 MCP · ${form.name}`)
-      subtitleEl.textContent = skills
-        ? '保存后连同附加文件一起发布到沙箱，下一步会话即可使用。'
-        : '只支持 streamable-http；保存后下一步会话会挂上它的工具。'
-      saveButton.textContent = form.mode === 'create' ? '＋ 创建' : '保存'
-      saveButton.disabled = state.busy
+      createButton.hidden = true
+      // 用户新建 / 编辑 / 重置密码：主按钮放在表单底部，顶栏不再放「创建」。
+      const userForm = form.kind === 'user' || form.kind === 'user-reset'
+      saveButton.hidden = userForm
+      if (form.kind === 'user-reset') {
+        titleEl.textContent = `重置密码 · ${form.id}`
+        subtitleEl.textContent = '为该成员设置新登录密码；不是修改你自己的账号密码。'
+      } else if (form.kind === 'user') {
+        titleEl.textContent = form.mode === 'create' ? '新建用户' : `编辑用户 · ${form.id}`
+        subtitleEl.textContent = form.mode === 'create'
+          ? '初始密码留空会自动生成；填写时至少 6 位。成员首次登录必须修改。'
+          : '登录名不可修改；可以调整显示名、角色和启用状态。'
+      } else {
+        const skills = state.view === 'skills'
+        titleEl.textContent = form.mode === 'create'
+          ? (skills ? '新建 Skill' : '新建 MCP')
+          : (skills ? `编辑 Skill · ${form.name}` : `编辑 MCP · ${form.name}`)
+        subtitleEl.textContent = skills
+          ? '保存后连同附加文件一起发布到沙箱，下一步会话即可使用。'
+          : '只支持 streamable-http；保存后下一步会话会挂上它的工具。'
+        saveButton.textContent = form.mode === 'create' ? '＋ 创建' : '保存'
+        saveButton.disabled = state.busy
+      }
       return
     }
-    titleEl.textContent = skills ? 'Skills 管理' : 'MCP 管理'
-    subtitleEl.textContent = skills
-      ? '创建自己的技能，或把技能公开给所有成员。公开人人可用，私有只有自己可用。'
-      : '接入 HTTP MCP server；密钥由平台加密保存，脑侧按需解密。'
-    createButton.textContent = skills ? '＋ 新建 Skill' : '＋ 新建 MCP'
+    saveButton.hidden = true
+    const head = VIEW_HEAD[state.view] || VIEW_HEAD.skills
+    titleEl.textContent = head.title
+    subtitleEl.textContent = head.subtitle
+    createButton.hidden = head.create === ''
+    createButton.textContent = head.create
+  }
+
+  function renderNotice() {
+    if (state.notice) {
+      noticeEl.hidden = false
+      noticeEl.textContent = state.notice
+    } else {
+      noticeEl.hidden = true
+      noticeEl.textContent = ''
+    }
   }
 
   function render() {
     renderError()
+    renderNotice()
     syncHeader()
     bodyEl.replaceChildren()
     if (state.form) {
-      bodyEl.append(renderForm())
+      if (state.form.kind === 'user-reset') bodyEl.append(renderResetPasswordForm())
+      else if (state.form.kind === 'user') bodyEl.append(renderUserForm())
+      else bodyEl.append(renderForm())
+      return
+    }
+    if (state.view === 'users') {
+      if (!state.loading && state.items.length === 0) {
+        bodyEl.append(emptyState())
+        return
+      }
+      bodyEl.append(renderUserToolbar())
+      bodyEl.append(state.loading && state.items.length === 0
+        ? el('div', { class: 'admin-state', text: '加载中…' })
+        : renderUserTable())
+      return
+    }
+    if (state.view === 'sandboxes') {
+      // 筛选条始终保留：空结果 / 加载中也不能把上面的操作栏弄没。
+      bodyEl.append(renderSandboxToolbar())
+      if (state.loading && state.items.length === 0) {
+        bodyEl.append(el('div', { class: 'admin-state', text: '加载中…' }))
+      } else if (!state.loading && state.items.length === 0) {
+        bodyEl.append(emptyState())
+      } else {
+        bodyEl.append(renderSandboxTable(), renderPager())
+      }
       return
     }
     if (state.loading && state.items.length === 0) {
@@ -296,6 +431,21 @@
   }
 
   function emptyState() {
+    if (state.view === 'users') {
+      return el('div', { class: 'admin-state empty' },
+        el('h2', { text: '还没有成员' }),
+        el('p', { text: '新建一个成员账号，把初始密码转交给他；首次登录会要求改密。' }),
+        el('button', {
+          class: 'admin-button primary',
+          type: 'button',
+          onclick: () => openUserForm('create'),
+        }, '＋ 新建用户'))
+    }
+    if (state.view === 'sandboxes') {
+      return el('div', { class: 'admin-state empty' },
+        el('h2', { text: '没有匹配的沙箱' }),
+        el('p', { text: '沙箱注册表还没有写入，或当前过滤条件没有结果。' }))
+    }
     const skills = state.view === 'skills'
     return el('div', { class: 'admin-state empty' },
       el('h2', { text: skills ? '还没有 Skills' : '还没有 MCP' }),
@@ -426,6 +576,407 @@
     const grid = el('div', { class: 'dsh-card-grid' })
     for (const item of state.items) grid.append(cardOf(item))
     return grid
+  }
+
+  // ── 用户管理 ──────────────────────────────────────────────────────────
+
+  function badge(text, extra) {
+    return el('span', { class: `admin-badge${extra ? ` ${extra}` : ''}`, text })
+  }
+
+  function filteredUsers() {
+    const q = state.userQuery.trim().toLowerCase()
+    return state.items.filter((member) => {
+      if (state.userRole && member.role !== state.userRole) return false
+      if (state.userStatus && member.status !== state.userStatus) return false
+      if (q === '') return true
+      return String(member.id).toLowerCase().includes(q)
+        || String(member.displayName || '').toLowerCase().includes(q)
+    })
+  }
+
+  function renderUserToolbar() {
+    const wrap = el('div', { class: 'admin-toolbar' })
+    const query = el('input', {
+      type: 'search',
+      placeholder: '搜索登录名 / 显示名',
+      value: state.userQuery,
+      oninput: (event) => { state.userQuery = event.target.value; render() },
+    })
+    const role = el('select', {
+      onchange: (event) => { state.userRole = event.target.value; render() },
+    })
+    for (const [value, label] of [['', '全部角色'], ['admin', '管理员'], ['member', '成员']]) {
+      role.append(el('option', { value }, label))
+    }
+    role.value = state.userRole
+    const status = el('select', {
+      onchange: (event) => { state.userStatus = event.target.value; render() },
+    })
+    for (const [value, label] of [['', '全部状态'], ['active', '启用'], ['disabled', '停用']]) {
+      status.append(el('option', { value }, label))
+    }
+    status.value = state.userStatus
+    wrap.append(
+      query,
+      role,
+      status,
+      el('button', {
+        class: 'admin-button small',
+        type: 'button',
+        onclick: () => {
+          state.userQuery = ''
+          state.userRole = ''
+          state.userStatus = ''
+          render()
+        },
+      }, '清除'),
+    )
+    return wrap
+  }
+
+  function renderUserTable() {
+    const rows = filteredUsers()
+    if (rows.length === 0) {
+      return el('div', { class: 'admin-state empty' },
+        el('h2', { text: state.items.length === 0 ? '还没有成员' : '没有匹配的成员' }),
+        el('p', { text: state.items.length === 0
+          ? '新建一个成员账号，把初始密码转交给他；首次登录会要求改密。'
+          : '试试清空筛选条件，或换个关键字。' }))
+    }
+    const table = el('table', { class: 'admin-table' })
+    const head = el('tr')
+    for (const label of ['登录名', '显示名', '角色', '状态', '创建时间', '操作']) head.append(el('th', { text: label }))
+    table.append(el('thead', null, head))
+    const body = el('tbody')
+    for (const member of rows) body.append(userRow(member))
+    table.append(body)
+    return el('div', { class: 'admin-table-wrap' }, table)
+  }
+
+  function userRow(member) {
+    const self = member.id === me.id
+    const actions = el('div', { class: 'row-actions' },
+      cardAction('编辑', '', () => openUserForm('edit', member)))
+    // 重置密码是管理员给「该成员」设新口令，不是改自己的；自己走头像菜单「修改密码」。
+    if (!self) {
+      actions.append(cardAction('重置密码', '', () => openResetPasswordForm(member)))
+      actions.append(cardAction(
+        member.role === 'admin' ? '设为成员' : '设为管理员',
+        '',
+        () => void changeRole(member, member.role === 'admin' ? 'member' : 'admin'),
+      ))
+      actions.append(cardAction(
+        member.status === 'active' ? '停用' : '启用',
+        member.status === 'active' ? 'danger' : '',
+        () => void toggleStatus(member),
+      ))
+    } else {
+      actions.append(el('span', { class: 'admin-hint', text: '当前账号' }))
+    }
+    return el('tr', null,
+      el('td', { class: 'mono', text: member.id }),
+      el('td', { text: member.displayName }),
+      el('td', null, badge(member.role === 'admin' ? '管理员' : '成员', member.role === 'admin' ? 'admin' : '')),
+      el('td', null, badge(member.status === 'active' ? '启用' : '停用', member.status === 'active' ? '' : 'off')),
+      el('td', { text: formatDate(member.createdAt) }),
+      el('td', null, actions))
+  }
+
+  function openResetPasswordForm(member) {
+    state.error = ''
+    state.notice = ''
+    state.listScroll = mainEl ? mainEl.scrollTop : 0
+    state.form = {
+      kind: 'user-reset',
+      id: member.id,
+      displayName: member.displayName,
+      password: '',
+    }
+    render()
+    const first = bodyEl.querySelector('input:not([disabled])')
+    if (first) first.focus()
+  }
+
+  function renderResetPasswordForm() {
+    const form = state.form
+    const section = el('section', { class: 'admin-card' })
+    const grid = el('div', { class: 'admin-grid' })
+    grid.append(field('成员登录名', el('input', { value: form.id, disabled: true })))
+    grid.append(field('显示名', el('input', { value: form.displayName, disabled: true })))
+    grid.append(field('新密码', el('input', {
+      type: 'text',
+      value: form.password,
+      placeholder: '留空自动生成；至少 6 位',
+      autocomplete: 'new-password',
+      oninput: (event) => { form.password = event.target.value },
+    })))
+    section.append(grid)
+    section.append(el('p', {
+      class: 'admin-hint',
+      text: `这是重置成员「${form.displayName}」的登录密码，不是改你自己的账号。旧密码立即失效；对方下次登录必须先改密。`,
+    }))
+    section.append(el('div', { class: 'admin-form-actions' },
+      el('button', {
+        class: 'admin-button primary',
+        type: 'button',
+        disabled: state.busy,
+        onclick: () => void save(),
+      }, state.busy ? '处理中…' : '确认重置')))
+    return section
+  }
+
+  async function saveResetPassword() {
+    const form = state.form
+    const password = form.password.trim()
+    if (password !== '' && password.length < 6) throw new Error('密码至少 6 位')
+    const result = await api(`/admin/users/${encodeURIComponent(form.id)}/password`, {
+      method: 'POST',
+      body: JSON.stringify(password === '' ? {} : { password }),
+    })
+    state.notice = `已重置成员 ${form.id} 的密码。新密码：${result.initialPassword}（只显示这一次，请转交本人）`
+    state.form = null
+    await load()
+  }
+
+  async function toggleStatus(member) {
+    if (state.busy) return
+    const next = member.status === 'active' ? 'disabled' : 'active'
+    if (next === 'disabled' && !window.confirm(`停用「${member.displayName}」？该账号会立即下线且不能再登录。`)) return
+    state.busy = true
+    state.error = ''
+    try {
+      await api(`/admin/users/${encodeURIComponent(member.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: next }),
+      })
+      state.notice = next === 'disabled' ? `已停用 ${member.id}。` : `已启用 ${member.id}。`
+      await load()
+    } catch (cause) {
+      state.error = messageOf(cause)
+      render()
+    } finally {
+      state.busy = false
+    }
+  }
+
+  async function changeRole(member, role) {
+    if (state.busy) return
+    const label = role === 'admin' ? '管理员' : '成员'
+    if (!window.confirm(`把「${member.displayName}」的角色改为${label}？`)) return
+    state.busy = true
+    state.error = ''
+    try {
+      await api(`/admin/users/${encodeURIComponent(member.id)}/role`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role }),
+      })
+      state.notice = `已把 ${member.id} 的角色改为${label}。`
+      await load()
+    } catch (cause) {
+      state.error = messageOf(cause)
+      render()
+    } finally {
+      state.busy = false
+    }
+  }
+
+  function openUserForm(mode, member) {
+    state.error = ''
+    state.notice = ''
+    state.listScroll = mainEl ? mainEl.scrollTop : 0
+    state.form = {
+      kind: 'user',
+      mode,
+      id: member ? member.id : '',
+      displayName: member ? member.displayName : '',
+      role: member ? member.role : 'member',
+      status: member ? member.status : 'active',
+      password: '',
+    }
+    render()
+    const first = bodyEl.querySelector('input:not([disabled])')
+    if (first) first.focus()
+  }
+
+  function renderUserForm() {
+    const form = state.form
+    const section = el('section', { class: 'admin-card' })
+    const grid = el('div', { class: 'admin-grid' })
+    grid.append(field('登录名', el('input', {
+      value: form.id,
+      placeholder: 'ivy',
+      disabled: form.mode === 'edit',
+      oninput: (event) => { form.id = event.target.value },
+    })))
+    grid.append(field('显示名', el('input', {
+      value: form.displayName,
+      placeholder: '不填就用登录名',
+      oninput: (event) => { form.displayName = event.target.value },
+    })))
+    const role = el('select', { onchange: (event) => { form.role = event.target.value === 'admin' ? 'admin' : 'member' } })
+    role.append(el('option', { value: 'member' }, '成员'), el('option', { value: 'admin' }, '管理员'))
+    role.value = form.role
+    grid.append(field('角色', role))
+    if (form.mode === 'create') {
+      grid.append(field('初始密码', el('input', {
+        type: 'text',
+        value: form.password,
+        placeholder: '留空自动生成；至少 6 位',
+        autocomplete: 'new-password',
+        oninput: (event) => { form.password = event.target.value },
+      })))
+    } else {
+      const status = el('select', { onchange: (event) => { form.status = event.target.value === 'disabled' ? 'disabled' : 'active' } })
+      status.append(el('option', { value: 'active' }, '启用'), el('option', { value: 'disabled' }, '停用'))
+      status.value = form.status
+      status.disabled = form.id === me.id
+      grid.append(field('状态', status))
+    }
+    section.append(grid)
+    section.append(el('p', {
+      class: 'admin-hint',
+      text: '密码至少 6 位。开户或重置成员密码后，该成员首次登录必须修改密码。',
+    }))
+    section.append(el('div', { class: 'admin-form-actions' },
+      el('button', {
+        class: 'admin-button primary',
+        type: 'button',
+        disabled: state.busy,
+        onclick: () => void save(),
+      }, state.busy ? '处理中…' : (form.mode === 'create' ? '＋ 创建用户' : '保存'))))
+    return section
+  }
+
+  async function saveUser() {
+    const form = state.form
+    const displayName = form.displayName.trim()
+    if (form.mode === 'create') {
+      const username = form.id.trim()
+      if (username === '') throw new Error('请填写登录名')
+      const payload = { username, role: form.role }
+      if (displayName !== '') payload.displayName = displayName
+      const password = form.password.trim()
+      if (password !== '') {
+        if (password.length < 6) throw new Error('密码至少 6 位')
+        payload.password = password
+      }
+      const created = await api('/admin/users', { method: 'POST', body: JSON.stringify(payload) })
+      state.notice = created.initialPassword
+        ? `已创建 ${created.member.id}。初始密码：${created.initialPassword}（只显示这一次，请转交本人）`
+        : `已创建 ${created.member.id}。请提醒本人首次登录后修改密码。`
+      state.form = null
+    } else {
+      await api(`/admin/users/${encodeURIComponent(form.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ displayName, role: form.role, status: form.status }),
+      })
+      state.notice = `已保存 ${form.id} 的资料。`
+      state.form = null
+    }
+    await load()
+  }
+
+  // ── 沙箱（只读） ──────────────────────────────────────────────────────
+
+  function renderSandboxToolbar() {
+    const wrap = el('div', { class: 'admin-toolbar' })
+    const user = el('input', {
+      type: 'search',
+      placeholder: '按成员登录名筛选',
+      value: state.sandboxUser,
+      oninput: (event) => { state.sandboxUser = event.target.value },
+      onkeydown: (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          state.page = 1
+          void load()
+        }
+      },
+    })
+    const picker = el('select', {
+      onchange: (event) => {
+        state.sandboxState = event.target.value
+        state.page = 1
+        void load()
+      },
+    })
+    for (const [value, label] of [
+      ['', '全部状态'],
+      ['creating', '创建中'],
+      ['ready', '就绪'],
+      ['paused', '已暂停'],
+      ['killed', '已销毁'],
+    ]) picker.append(el('option', { value }, label))
+    picker.value = state.sandboxState
+    wrap.append(
+      user,
+      picker,
+      el('button', {
+        class: 'admin-button small',
+        type: 'button',
+        onclick: () => { state.page = 1; void load() },
+      }, '查询'),
+      el('button', {
+        class: 'admin-button small',
+        type: 'button',
+        onclick: () => {
+          state.sandboxUser = ''
+          state.sandboxState = ''
+          state.page = 1
+          void load()
+        },
+      }, '清除'),
+    )
+    return wrap
+  }
+
+  function renderSandboxTable() {
+    const table = el('table', { class: 'admin-table' })
+    const head = el('tr')
+    for (const label of ['沙箱 ID', '归属', '工作区', '会话', '范围', '平台', '状态', 'Endpoint', '最近使用', '过期']) {
+      head.append(el('th', { text: label }))
+    }
+    table.append(el('thead', null, head))
+    const body = el('tbody')
+    for (const item of state.items) {
+      const owner = item.user_display_name
+        ? `${item.user_display_name}（${item.user_id}）`
+        : item.user_id
+      body.append(el('tr', null,
+        el('td', { class: 'mono', text: item.sandbox_id }),
+        el('td', { text: owner }),
+        el('td', { text: item.workspace_name || item.workspace_id || '—' }),
+        el('td', { class: 'mono', text: item.session_id || '—' }),
+        el('td', { text: item.scope }),
+        el('td', { text: item.platform }),
+        el('td', null, badge(item.state, item.state === 'ready' ? '' : 'off')),
+        el('td', { class: 'mono wrap', text: item.endpoint || '—' }),
+        el('td', { text: formatDate(item.last_used_at) }),
+        el('td', { text: formatDate(item.expires_at) })))
+    }
+    table.append(body)
+    return el('div', { class: 'admin-table-wrap' }, table)
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(state.total / state.pageSize))
+    const prev = el('button', {
+      class: 'admin-button small',
+      type: 'button',
+      disabled: state.page <= 1,
+      onclick: () => { if (state.page > 1) { state.page -= 1; void load() } },
+    }, '上一页')
+    const next = el('button', {
+      class: 'admin-button small',
+      type: 'button',
+      disabled: state.page >= pages,
+      onclick: () => { if (state.page < pages) { state.page += 1; void load() } },
+    }, '下一页')
+    return el('div', { class: 'admin-pager' },
+      el('span', { text: `共 ${state.total} 条 · 第 ${state.page} / ${pages} 页` }),
+      prev,
+      next)
   }
 
   function clearFiles() {
@@ -759,11 +1310,21 @@
     if (state.busy) return
     state.busy = true
     state.error = ''
+    state.notice = ''
     if (state.saveButton) {
       state.saveButton.disabled = true
       state.saveButton.textContent = '保存中…'
     }
     try {
+      // 用户相关表单自己会关表单并重新拉列表，别在这里再走 skills/mcp 收尾。
+      if (state.form && state.form.kind === 'user') {
+        await saveUser()
+        return
+      }
+      if (state.form && state.form.kind === 'user-reset') {
+        await saveResetPassword()
+        return
+      }
       if (state.view === 'skills') await saveSkill()
       else await saveMcp()
       closeForm()
@@ -775,7 +1336,7 @@
       state.busy = false
       if (state.saveButton && state.saveButton.isConnected) {
         state.saveButton.disabled = false
-        state.saveButton.textContent = state.form && state.form.mode === 'edit' ? '保存' : '＋ 创建'
+        syncHeader()
       }
     }
   }
@@ -814,83 +1375,103 @@
     state.loading = true
     render()
     try {
-      const items = await api(state.view === 'skills' ? '/skills' : '/mcp-servers')
-      state.items = Array.isArray(items) ? items : []
+      if (state.view === 'users') {
+        const members = await api('/admin/users')
+        state.items = Array.isArray(members) ? members : []
+      } else if (state.view === 'sandboxes') {
+        const params = new URLSearchParams()
+        params.set('page', String(state.page))
+        params.set('page_size', String(state.pageSize))
+        const userId = state.sandboxUser.trim()
+        if (userId !== '') params.set('user_id', userId)
+        if (state.sandboxState !== '') params.set('state', state.sandboxState)
+        const page = await api(`/admin/sandboxes?${params.toString()}`)
+        state.items = Array.isArray(page?.items) ? page.items : []
+        state.total = Number(page?.total) || 0
+        state.page = Number(page?.page) || 1
+        state.pageSize = Number(page?.page_size) || state.pageSize
+      } else {
+        const items = await api(state.view === 'skills' ? '/skills' : '/mcp-servers')
+        state.items = Array.isArray(items) ? items : []
+      }
       state.error = ''
     } catch (cause) {
       state.error = messageOf(cause)
+      state.items = []
     } finally {
       state.loading = false
       render()
     }
   }
 
+  /** 未知视图或当前身份看不到的视图一律退回 Skills，和服务端 resolveConsoleView 对齐。 */
+  function resolveView(raw) {
+    // 头像菜单的「管理」入口不走侧栏，所以按全部可见视图解析，别只看 menuEntries。
+    const match = visibleEntries().find((entry) => entry.view === raw)
+    return match ? match.view : 'skills'
+  }
+
   async function setView(view) {
-    state.view = view === 'mcp' ? 'mcp' : 'skills'
+    state.view = resolveView(view)
     state.form = null
+    state.page = 1
+    state.notice = ''
+    // 先清掉上一页的行，别在加载期间把成员对象塞进沙箱表格或反之。
+    state.items = []
+    state.total = 0
     clearFiles()
     syncMenuActive()
     await load()
   }
 
-  function mainHost() {
-    return document.querySelector('[class*="mainPanel"]')
-      || document.querySelector('[class*="centerCol"]')
+  /** 用户 / 沙箱是「管理」页；Skills / MCP 是各自独立的整页。 */
+  function scopeOf(view) {
+    return view === 'users' || view === 'sandboxes' ? 'admin' : 'tool'
   }
 
-  function mountIntoMain() {
-    const host = mainHost()
-    if (!host) {
-      if (root.parentElement !== document.body) document.body.appendChild(root)
-      return
-    }
-    if (root.parentElement !== host) host.appendChild(root)
-    host.setAttribute('data-dsh-console-host', '')
-    for (const child of host.children) {
-      if (child === root) continue
-      if (!child.hasAttribute('data-dsh-console-prev-display')) {
-        child.setAttribute('data-dsh-console-prev-display', child.style.display)
-      }
-      child.style.display = 'none'
-    }
-  }
-
-  function unmountFromMain() {
-    const host = root.parentElement
-    if (host && host.hasAttribute('data-dsh-console-host')) {
-      for (const child of host.children) {
-        if (child === root) continue
-        if (!child.hasAttribute('data-dsh-console-prev-display')) continue
-        child.style.display = child.getAttribute('data-dsh-console-prev-display') || ''
-        child.removeAttribute('data-dsh-console-prev-display')
-      }
-      host.removeAttribute('data-dsh-console-host')
-    }
+  // 和设置页一样挂在 body 上，靠 CSS 的 sidebar-width inset 留出左侧菜单。
+  function mountConsole() {
     if (root.parentElement !== document.body) document.body.appendChild(root)
   }
 
   async function open(view) {
     await loadMe()
-    mountIntoMain()
+    const target = resolveView(view)
+    root.dataset.scope = scopeOf(target)
+    mountConsole()
     root.hidden = false
     root.dataset.open = 'true'
     root.setAttribute('aria-hidden', 'false')
-    await setView(view === 'mcp' ? 'mcp' : 'skills')
+    renderPanelNav()
+    await setView(target)
   }
 
   function close() {
     root.hidden = true
     root.dataset.open = 'false'
     root.setAttribute('aria-hidden', 'true')
-    unmountFromMain()
     syncMenuActive()
   }
 
   backButton.addEventListener('click', close)
+  // 和设置页一样：点到整页之外（左侧会话列表、菜单、头像等）就返回对话，
+  // 但这次点击本身照常交给客户端处理，别把左侧菜单吞掉。
+  // 自己的侧栏入口（Skills / MCP）例外，它们要在页内切换视图。
+  document.addEventListener('click', (event) => {
+    if (root.dataset.open !== 'true') return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (root.contains(target)) return
+    if (target.closest('#dsh-console-menu')) return
+    close()
+  }, true)
   refreshButton.addEventListener('click', () => {
     if (!state.busy) void load()
   })
-  createButton.addEventListener('click', () => openForm('create'))
+  createButton.addEventListener('click', () => {
+    if (state.view === 'users') openUserForm('create')
+    else void openForm('create')
+  })
   saveButton.addEventListener('click', () => void save())
   returnButton.addEventListener('click', closeForm)
   document.addEventListener('keydown', (event) => {
@@ -903,19 +1484,6 @@
     }
     close()
   })
-  // 点「新建会话 / 会话树 / 工作区」等侧栏聊天入口时退回对话主区。
-  document.addEventListener('click', (event) => {
-    if (root.dataset.open !== 'true') return
-    const target = event.target
-    if (!(target instanceof Element)) return
-    if (root.contains(target)) return
-    if (target.closest('#dsh-console-menu')) return
-    if (target.closest('#dsh-account')) return
-    const sidebar = document.querySelector('[class*="sidebarCol"]')
-    if (!sidebar || !sidebar.contains(target)) return
-    close()
-  })
-
   window.__dshConsoleOpen = (view) => {
     void open(view)
   }

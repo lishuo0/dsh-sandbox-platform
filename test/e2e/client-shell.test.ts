@@ -205,7 +205,12 @@ describe('登录后的客户端外壳', () => {
     expect(html).toContain('id="dsh-account-role"')
     expect(html).toContain('id="dsh-account-menu"')
     expect(html).toContain('id="dsh-account-settings"')
+    expect(html).toContain('id="dsh-account-change-password"')
     expect(html).toContain('id="dsh-account-logout"')
+    // 强制改密弹窗随外壳下发；账号菜单的「修改密码」复用同一个。
+    expect(html).toContain('id="dsh-account-password"')
+    expect(html).toContain('window.__dshAccountChangePassword')
+    expect(html).toContain('mustChangePassword')
     expect(html).toContain('openSettings')
     expect(html).toContain('closeSettings')
     // 头像挂进侧栏底槽，会话列表只滚自己的区域，不会和头像重叠。
@@ -216,26 +221,52 @@ describe('登录后的客户端外壳', () => {
     // Skills / MCP 是左侧菜单入口，不挤在左下角账号菜单里。
     expect(html).not.toContain('id="dsh-account-skills"')
     expect(html).not.toContain('id="dsh-account-mcp"')
+    // 左下角头像菜单里的「管理」子菜单：只有管理员能看到，下面挂用户 / 沙箱。
+    expect(html).toContain('id="dsh-account-admin"')
+    expect(html).toContain("window.__dshConsoleOpen('users')")
+    expect(html).toContain("adminRow.hidden = roleKey !== 'admin'")
+    expect(html).toContain('"view":"users"')
+    expect(html).toContain('"view":"sandboxes"')
+    expect(html).toContain('"menu":"account"')
     expect(html).toContain('window.__dshConsoleOpen')
     // 平台自己的 Skills / MCP 配置页随外壳一起下发，入口插进侧栏面板导航。
     expect(html).toContain('id="dsh-console"')
     expect(html).toContain('dsh-console-menu')
     expect(html).toContain('[class*="sidebarCol"]')
-    expect(html).toContain("view: 'skills'")
-    expect(html).toContain("view: 'mcp'")
+    // 视图清单由服务端注入成 JSON 字面量，不再硬编码在浏览器脚本里。
+    expect(html).toContain('"view":"skills"')
+    expect(html).toContain('"view":"mcp"')
+    expect(html).toContain('"view":"users"')
+    expect(html).toContain('"view":"sandboxes"')
+    expect(html).toContain('"adminOnly":true')
+    expect(html).not.toContain('__CONSOLE_VIEWS__')
     // 页面里只有内容区，没有第二套 Skills / MCP 菜单。
     expect(html).not.toContain('admin-page-side')
     expect(html).not.toContain('admin-page-nav')
     expect(html).toContain('id="dsh-console-body"')
+    // 设置页同款：左栏导航 + 内容，fixed 钉在侧栏右侧，不盖左侧菜单。
+    expect(html).toContain('id="dsh-console-rail"')
+    expect(html).toContain('id="dsh-console-nav"')
+    expect(html).toContain('data-scope="admin"')
+    expect(html).toContain('function mountConsole')
+    expect(html).toContain('--dsh-platform-sidebar-width')
+    expect(html).toContain('position:fixed')
+    expect(html).not.toContain('function mountIntoMain')
+    expect(html).not.toContain('id="dsh-console-mask"')
+    expect(html).not.toContain('id="dsh-console-panel"')
+    // 点到整页之外先返回对话，左侧菜单不会被整页吞掉点击。
+    expect(html).toContain("target.closest('#dsh-console-menu')")
+    expect(html).toContain("root.contains(target)")
     // 新建 / 编辑是列表页里的表单子页：页头切换成「返回列表 / 保存」，不再叠在网格上方。
     expect(html).toContain('id="dsh-console-return"')
     expect(html).toContain('id="dsh-console-save"')
     expect(html).toContain('function syncHeader')
     expect(html).toContain('function closeForm')
-    // Skills / MCP 列表是卡片网格，不再下发表格行。
+    // Skills / MCP 是卡片网格；用户和沙箱是管理员表格页。
     expect(html).toContain('dsh-card-grid')
     expect(html).toContain('dsh-card-avatar')
-    expect(html).not.toContain('admin-table')
+    expect(html).toContain('renderUserTable')
+    expect(html).toContain('renderSandboxTable')
     expect(html).not.toContain('合集')
     expect(html).toContain('--dsh-platform-sidebar-width')
     expect(html).not.toContain('id="dsh-account-general"')

@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS dsh_users (
   password_hash text NOT NULL,
   role text NOT NULL DEFAULT 'member',
   status text NOT NULL DEFAULT 'active',
+  -- 管理员开户、重置密码后置 1；成员改过自己的密码才清掉。
+  must_change_password integer NOT NULL DEFAULT 0,
   skills_volume text,
   created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

@@ -24,6 +24,8 @@
  * `dsh-context` 的推荐卡带着「桌面端现已发布」推广，web 平台里指向不存在的东西，
  * 一并清空。
  *
+ * 会话空态 hero 上的「预览版」徽章是上游桌面预览标；平台会话页不需要，直接去掉。
+ *
  * 这是对上游构建产物的文本修补：上游改写法时这里会静默失效。
  * `test/unit/client-patch.test.ts` 盯着标记，升级 DSH 时先跑单测。
  */
@@ -115,12 +117,23 @@ export function patchDeliverables(source: string): string {
   return patched
 }
 
+/** 会话空态 hero：去掉「预览版」徽章。 */
+const HERO_PREVIEW_BADGE =
+  '(0,react_jsx_runtime.jsx)(`span`,{className:HeroShell_module_css_default.previewBadge,children:t(`hero.preview`)})'
+
+/** 会话页不展示上游的预览版徽章。 */
+export function patchConversation(source: string): string {
+  return source.replaceAll(HERO_PREVIEW_BADGE, 'null')
+}
+
 /** 对 `/plugins` 返回的 JavaScript 批量包应用修补；其余响应原样返回。 */
 export async function patchPluginResponse(response: Response, method: string): Promise<Response> {
   if (method === 'HEAD') return response
   if (response.status !== 200) return response
   if (!(response.headers.get('content-type') ?? '').includes('javascript')) return response
   const source = await response.text()
-  const patched = patchDeliverables(patchSettingsModels(patchDshContext(patchSettingsGeneral(source))))
+  const patched = patchConversation(
+    patchDeliverables(patchSettingsModels(patchDshContext(patchSettingsGeneral(source)))),
+  )
   return new Response(patched, { status: response.status, headers: response.headers })
 }

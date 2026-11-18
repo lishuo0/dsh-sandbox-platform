@@ -16,6 +16,7 @@ import { renderIndexInjections } from '@deepseek-ai/dsh-host-webserver'
 import { clientPackages, requiredClientPackages } from './roster.js'
 import { patchPluginResponse } from './patch.js'
 import { userBadge } from './user-badge.js'
+import { accountDialog } from './account.js'
 import { platformConsole } from './console.js'
 import { workspaceCreate } from './workspace-create.js'
 import { filesUpload } from './files-upload.js'
@@ -132,6 +133,8 @@ export async function startClientHost(): Promise<ClientHost> {
       { kind: 'html', placement: 'body', html: filesUpload() },
       // DSH 客户端没有账号入口，登录身份由平台补充在侧边栏左下角。
       { kind: 'html', placement: 'body', html: userBadge() },
+      // 首次登录强制改密 / 账号菜单的「修改密码」共用这个弹窗。
+      { kind: 'html', placement: 'body', html: accountDialog() },
     ],
   )
 

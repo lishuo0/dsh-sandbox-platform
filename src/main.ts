@@ -17,7 +17,7 @@ try {
   await bootstrapAdmin(deps)
 } catch (error) {
   if (error instanceof HttpError) {
-    throw new Error('还没有管理员。请在 config.yaml 填写 auth.adminUsername 和至少 12 位的 auth.adminPassword')
+    throw new Error('还没有管理员。请在 config.yaml 填写 auth.adminUsername 和至少 6 位的 auth.adminPassword')
   }
   throw error
 }

@@ -26,12 +26,17 @@ describe('登录身份条', () => {
     expect(html).not.toContain('openSettingsSection')
   })
 
-  it('账号菜单只留设置和退出，Skills / MCP 不放左下角', () => {
+  it('账号菜单里只有管理员的「管理」入口，Skills / MCP 不放左下角', () => {
     const html = userBadge()
     expect(html).not.toContain('id="dsh-account-skills"')
     expect(html).not.toContain('id="dsh-account-mcp"')
     expect(html).not.toContain('openConsole')
-    expect(html).not.toContain('__dshConsoleOpen')
+    // 「管理」直接打开设置页同款面板；不再有下拉子菜单。
+    expect(html).toContain('id="dsh-account-admin"')
+    expect(html).toContain("window.__dshConsoleOpen('users')")
+    expect(html).toContain("adminRow.hidden = roleKey !== 'admin'")
+    expect(html).not.toContain('id="dsh-account-admin-menu"')
+    expect(html).not.toContain('renderAdminMenu')
   })
 
   it('退出登录在账号菜单里', () => {
@@ -59,11 +64,14 @@ describe('登录身份条', () => {
     expect(html).not.toContain('style="display:none;position:fixed')
   })
 
-  it('侧栏收成 rail 时只留圆形头像', () => {
+  it('侧栏收成 rail 时只留圆形头像，并 fixed 钉在可见轨底', () => {
     const html = userBadge()
     expect(html).toContain('data-rail="true"')
     expect(html).toContain('#dsh-account[data-rail="true"] .dsh-acct-ident{display:none}')
-    expect(html).toContain("root.dataset.rail = width > 0 && width <= 120 ? 'true' : 'false'")
+    expect(html).toContain('mountFixedRail')
+    expect(html).toContain("root.dataset.rail = rail ? 'true' : 'false'")
+    // 收起后再展开要清掉 fixed 残留宽度，否则头像回不来 / 错位。
+    expect(html).toContain("root.style.width = ''")
   })
 
   it('DOM 变更按帧合并，聊天流式输出时不反复量侧栏', () => {
@@ -81,7 +89,8 @@ describe('登录身份条', () => {
 
   it('角色映射成中文，名字用 textContent 写入', () => {
     const html = userBadge()
-    expect(html).toContain("data.role === 'admin' ? '管理员'")
+    expect(html).toContain("data.role === 'admin' ? 'admin' : 'member'")
+    expect(html).toContain("roleKey === 'admin' ? '管理员'")
     expect(html).toContain("data.role === 'member' ? '成员'")
     expect(html).toContain('.textContent = name')
     expect(html).toContain('display:none')

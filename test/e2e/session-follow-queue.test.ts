@@ -310,6 +310,16 @@ async function rpc(method: string, args: Record<string, unknown>): Promise<{
   return await response.json() as { result: { ok: boolean; value?: unknown; error?: { code: string } } }
 }
 
+/** 等队列真的清空：脑收到 `/messages` 和平台出队是两件事，顺序不保证。 */
+async function waitForQueueEmpty(sessionId: string, timeoutMs = 4_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if ((await queueRows(sessionId)).length === 0) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`会话 ${sessionId} 的队列没有在超时内清空`)
+}
+
 async function queueRows(sessionId: string): Promise<Array<{ item_id: string; request_id: string; content: string }>> {
   const rows = await platform.db.query<{ item_id: string; request_id: string; content: string }>(
     `SELECT item_id, request_id, content FROM dsh_session_queue WHERE session_id = $1 ORDER BY created_at ASC, item_id ASC`,
@@ -590,7 +600,7 @@ describe('平台输入队列的派发', () => {
       request: { sessionId: S2, requestId: 'req_wake_1', content: [{ type: 'text', text: 'first' }] },
     })
     await waitForMessages(baseline + 1)
-    expect(await queueRows(S2)).toEqual([])
+    await waitForQueueEmpty(S2)
 
     // 第一轮结束：脑再报一次空闲。此后泵已知空闲，脑不会再发状态帧。
     pushTo(S2, { type: 'status', running: false })
@@ -621,7 +631,7 @@ describe('平台输入队列的派发', () => {
     expect(await queueRows(S3)).toHaveLength(1)
     // 泵自己按退避重试，第二次成功并出队。
     await waitForMessages(baseline + 2, 5_000)
-    expect(await queueRows(S3)).toEqual([])
+    await waitForQueueEmpty(S3, 5_000)
     const sent = calls.filter((call) => call.path.endsWith('/messages')).slice(baseline)
     expect(sent.at(-1)).toMatchObject({
       path: `/brain/v1/sessions/${S3}/messages`,

@@ -1,7 +1,14 @@
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { patchDeliverables, patchDshContext, patchPluginResponse, patchSettingsGeneral, patchSettingsModels } from '../../src/client/patch.js'
+import {
+  patchConversation,
+  patchDeliverables,
+  patchDshContext,
+  patchPluginResponse,
+  patchSettingsGeneral,
+  patchSettingsModels,
+} from '../../src/client/patch.js'
 import { clientPackages } from '../../src/client/roster.js'
 
 /**
@@ -168,6 +175,29 @@ describe('dsh-context 桌面推广修补', () => {
     expect(source).toContain(CONTEXT_DESKTOP_PROMO)
     expect(patchDshContext(source)).not.toContain(CONTEXT_DESKTOP_PROMO)
     expect(patchDshContext(source)).toContain('promotion:{zh:``,en:``},')
+  })
+})
+
+describe('会话页预览版徽章修补', () => {
+  const HERO_PREVIEW_BADGE =
+    '(0,react_jsx_runtime.jsx)(`span`,{className:HeroShell_module_css_default.previewBadge,children:t(`hero.preview`)})'
+
+  it('去掉 hero 上的预览版徽章节点', () => {
+    expect(patchConversation(`a;${HERO_PREVIEW_BADGE};b`)).toBe('a;null;b')
+  })
+
+  it('已安装的 conversation 构建产物仍带标记', () => {
+    const file = require.resolve('@deepseek-ai/dsh-client-ui-conversation/client')
+    const source = readFileSync(file, 'utf8')
+    expect(source).toContain(HERO_PREVIEW_BADGE)
+    expect(patchConversation(source)).not.toContain(HERO_PREVIEW_BADGE)
+  })
+
+  it('对 conversation 包走 /plugins 响应时一并生效', async () => {
+    const response = new Response(`x;${HERO_PREVIEW_BADGE};y`, {
+      headers: { 'content-type': 'text/javascript; charset=utf-8' },
+    })
+    expect(await (await patchPluginResponse(response, 'GET')).text()).toBe('x;null;y')
   })
 })
 

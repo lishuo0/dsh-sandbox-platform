@@ -81,6 +81,11 @@ export async function migrate(db: Db): Promise<void> {
     sqlite: `ALTER TABLE dsh_mcp_servers ADD COLUMN group_id text`,
     postgres: `ALTER TABLE dsh_mcp_servers ADD COLUMN group_id text`,
   })
+  // 管理员开户 / 重置密码后强制成员改密；老账号没有这一列，默认 false 不影响登录。
+  await addColumnIfMissing(db, 'dsh_users', 'must_change_password', {
+    sqlite: `ALTER TABLE dsh_users ADD COLUMN must_change_password integer NOT NULL DEFAULT 0`,
+    postgres: `ALTER TABLE dsh_users ADD COLUMN must_change_password boolean NOT NULL DEFAULT false`,
+  })
   await db.exec(readFileSync(file, 'utf8'))
   await migrateLegacyModelProviders(db)
 }

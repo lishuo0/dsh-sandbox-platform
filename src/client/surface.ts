@@ -14,6 +14,7 @@ import { decodeKey, type AppConfig } from '../config.js'
 import type { Db } from '../kernel/db.js'
 import { createObjectStore, type ObjectStore } from '../kernel/objects.js'
 import { HttpError } from '../kernel/errors.js'
+import { API_PREFIX, MUST_CHANGE_ALLOWED, PUBLIC_API_PATHS } from '../kernel/access.js'
 import { readToken, signToken } from '../kernel/tokens.js'
 import { BrainClient } from '../brain/client.js'
 import { authenticate } from '../modules/identity/service.js'
@@ -103,10 +104,29 @@ async function handle(
   const path = url.pathname
   const remote = remoteEndpoint(path)
   const stream = sseEndpoint(path)
+  // 数据面统一门禁：统一前缀下的接口（启动资产、公开 API 除外）都先认人；
+  // 开户 / 重置密码后的临时口令只能换密码，其余数据面一律 403。
+  const gated = path.startsWith('/dsh-api/')
+    && !path.startsWith(BOOT_ASSET_PREFIX)
+    && !isPublicApiPath(path)
+  const userId = gated ? currentUser(cfg, req) : undefined
+  const access = gated ? await accessState(db, userId) : 'ok'
+  if (gated) {
+    if (access === 'unauthorized') {
+      res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('unauthorized')
+      return true
+    }
+    if (access === 'must-change-password' && !passwordChangeExempt(path)) {
+      const text = JSON.stringify({ code: 1, msg: 'must-change-password', data: null })
+      res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(text)
+      return true
+    }
+  }
   if (remote !== undefined || stream !== undefined) {
     // 统一前缀下的所有面都先认人；跨租户在分发器里按「不存在」处理。
-    const userId = currentUser(cfg, req)
-    if (!userId || !(await activeUser(db, userId))) {
+    if (!userId || access !== 'ok') {
       res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
       res.end('unauthorized')
       return true
@@ -198,8 +218,7 @@ async function handle(
     || path === '/dsh-api/platform/v1/workspaceFiles/upload'
     || path.startsWith(CONTEXT_PREFIX)
   ) {
-    const userId = currentUser(cfg, req)
-    if (!userId || !(await activeUser(db, userId))) {
+    if (!userId || access !== 'ok') {
       res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
       res.end('unauthorized')
       return true
@@ -257,6 +276,8 @@ async function handle(
     return true
   }
   if (path === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
+    // 外壳页面本身不挡：临时口令的成员要能打开页面里的强制改密弹窗，
+    // 数据面由上面的门禁统一拦。这里同名 userId 只在页面分支生效。
     const userId = currentUser(cfg, req)
     if (!userId || !(await activeUser(db, userId))) {
       sendHtml(res, req.method === 'HEAD', loginPage())
@@ -339,9 +360,40 @@ export function currentUser(cfg: AppConfig, req: IncomingMessage): string | unde
  * 管理接口那边（`actorOf`）一直回查 `dsh_users.status`，客户端代理面也必须一致，
  * 否则被移除的成员还能继续读写自己的工作区和历史。
  */
+type AccessState = 'ok' | 'unauthorized' | 'must-change-password'
+
+/**
+ * 平台会话此刻能做什么：没登录 / 账号被停用是 unauthorized，
+ * 管理员开户或重置密码后的临时口令是 must-change-password。
+ * 每次请求都回查用户行，停用和强制改密立即生效。
+ */
+async function accessState(db: Db, userId: string | undefined): Promise<AccessState> {
+  if (!userId) return 'unauthorized'
+  const rows = await db.query(
+    `SELECT status, must_change_password FROM dsh_users WHERE id = $1`,
+    [userId],
+  )
+  const row = rows.rows[0] as { status: string; must_change_password: unknown } | undefined
+  if (!row || row.status !== 'active') return 'unauthorized'
+  const flag = row.must_change_password
+  return flag === true || flag === 1 || flag === '1' || flag === 't' ? 'must-change-password' : 'ok'
+}
+
 async function activeUser(db: Db, userId: string): Promise<boolean> {
-  const rows = await db.query(`SELECT 1 FROM dsh_users WHERE id = $1 AND status = 'active'`, [userId])
-  return rows.rows.length > 0
+  return (await accessState(db, userId)) !== 'unauthorized'
+}
+
+/** 健康检查、登录等公开接口不进门禁，交给路由表的 auth:'public'。 */
+function isPublicApiPath(path: string): boolean {
+  if (!path.startsWith(API_PREFIX)) return false
+  const relative = path.slice(API_PREFIX.length) || '/'
+  return (PUBLIC_API_PATHS as readonly string[]).includes(relative)
+}
+
+/** 临时口令只放行「看自己 / 改密码」，对应 kernel 的 MUST_CHANGE_ALLOWED。 */
+function passwordChangeExempt(path: string): boolean {
+  const relative = path.startsWith(API_PREFIX) ? path.slice(API_PREFIX.length) : path
+  return (MUST_CHANGE_ALLOWED as readonly string[]).includes(relative)
 }
 
 function cookie(req: IncomingMessage, name: string): string | undefined {

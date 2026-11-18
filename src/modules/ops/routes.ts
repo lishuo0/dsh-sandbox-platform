@@ -16,6 +16,8 @@ export function opsRoutes(deps: Deps): Route[] {
           data: await listSandboxes(deps.db, {
             page: Number(ctx.url.searchParams.get('page')),
             pageSize: Number(ctx.url.searchParams.get('page_size')),
+            userId: ctx.url.searchParams.get('user_id') ?? undefined,
+            state: ctx.url.searchParams.get('state') ?? undefined,
           }),
         })
       },

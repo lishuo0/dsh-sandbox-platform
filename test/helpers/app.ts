@@ -171,14 +171,36 @@ export async function api<T = unknown>(
   return { status: response.status, body: parsed, text }
 }
 
-/** 登录并返回 token。 */
+/**
+ * 登录并返回 token。
+ *
+ * 管理员开户 / 重置密码后的临时口令会被平台强制要求改密（数据面一律 403），
+ * 和浏览器打开时的弹窗一样，这里先用旧口令把密码换掉，再拿 token 继续跑用例。
+ * 需要断言强制改密状态的用例直接调 `/auth/login`，不要走这个 helper。
+ */
 export async function login(baseUrl: string, username: string, password: string): Promise<string> {
-  const response = await api<{ accessToken: string }>(baseUrl, '/auth/login', {
+  let response = await api<{ accessToken: string; mustChangePassword?: boolean }>(baseUrl, '/auth/login', {
     method: 'POST',
     body: { username, password },
   })
+  // 同一个用例文件里重复登录同一个成员时，前一次已经把临时口令换成派生口令了。
+  if (response.status === 401) {
+    response = await api<{ accessToken: string; mustChangePassword?: boolean }>(baseUrl, '/auth/login', {
+      method: 'POST',
+      body: { username, password: `${password}-changed` },
+    })
+  }
   if (response.status !== 200) throw new Error(`登录失败: ${response.status} ${response.text}`)
-  return response.body.data.accessToken
+  const { accessToken, mustChangePassword } = response.body.data
+  if (mustChangePassword === true) {
+    const changed = await api(baseUrl, '/me/password', {
+      method: 'PATCH',
+      token: accessToken,
+      body: { currentPassword: password, newPassword: `${password}-changed` },
+    })
+    if (changed.status !== 200) throw new Error(`首次改密失败: ${changed.status} ${changed.text}`)
+  }
+  return accessToken
 }
 
 /** 浏览器 Remote 面：`POST P/remote/<endpoint>`。 */

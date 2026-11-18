@@ -106,6 +106,25 @@ describe('/admin/sandboxes', () => {
     expect(fallback.body.data).toMatchObject({ page: 1, page_size: 20 })
   })
 
+  it('按登录名和状态筛选，总数跟着过滤条件走', async () => {
+    const byUser = await api<SandboxPage>(stack.baseUrl, '/admin/sandboxes?user_id=ivy', { token: stack.token })
+    expect(byUser.body.data.total).toBe(2)
+
+    const creating = await api<SandboxPage>(stack.baseUrl, '/admin/sandboxes?state=creating', { token: stack.token })
+    expect(creating.body.data.total).toBe(1)
+    expect(creating.body.data.items.map((row) => row.sandbox_id)).toEqual(['sbx-new'])
+
+    const combined = await api<SandboxPage>(
+      stack.baseUrl,
+      '/admin/sandboxes?user_id=ivy&state=creating',
+      { token: stack.token },
+    )
+    expect(combined.body.data.total).toBe(1)
+
+    const ghost = await api<SandboxPage>(stack.baseUrl, '/admin/sandboxes?user_id=ghost', { token: stack.token })
+    expect(ghost.body.data).toEqual({ items: [], total: 0, page: 1, page_size: 20 })
+  })
+
   it('普通成员无权查看 403', async () => {
     const response = await api(stack.baseUrl, '/admin/sandboxes', { token: memberToken })
     expect(response.status).toBe(403)
