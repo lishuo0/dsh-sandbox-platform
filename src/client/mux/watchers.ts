@@ -1,7 +1,13 @@
 /**
- * 会话上游 SSE 的共享订阅。
+ * 会话上游实时面的共享订阅。
  *
- * 平台对脑的实时面只应该有一条连接：`GET /brain/v1/sessions/{id}/stream`。
+ * 平台对脑的实时面只应该有一条连接。首选会话级 WebSocket
+ * （`GET /brain/v1/session/socket`，Upgrade），帧集与 SSE 完全相同；答复也从
+ * 这条连接上行，所以答复不会落到另一台脑上。
+ *
+ * SSE（`GET /brain/v1/sessions/{id}/stream`）保留为回退：Upgrade 建不起来时
+ * （入口不支持、旧脑版本）自动退回，帧集不变，答复改走 REST。
+ *
  * 浏览器的会话流、`$events` 的审批/提问转发、`session/state` 的运行状态都
  * 共用这一条。这里按会话维护一个订阅器，引用计数归零后关闭。
  *
@@ -9,7 +15,7 @@
  * `waterfall` 留在内存里，晚连上的订阅者先补投（否则审批会 fail closed）。
  */
 
-import type { BrainClient } from '../../brain/client.js'
+import type { BrainClient, BrainSessionSocket } from '../../brain/client.js'
 
 export interface WatchKey {
   readonly userId: string
@@ -34,6 +40,12 @@ export interface SessionWatchers {
   pending(sessionId: string): readonly WatchFrame[]
   /** 结算（答复/撤回）后移除。 */
   settle(sessionId: string, requestId: string): void
+  /**
+   * 在会话 socket 上带内答复。
+   * @returns true 脑已结算；false 该请求已撤销或不属于本会话；undefined 当前
+   *   没有 socket（调用方退回 REST）。
+   */
+  answer(sessionId: string, requestId: string, outcome: unknown): Promise<boolean | undefined>
   /** 停止所有上游连接。 */
   close(): void
 }
@@ -47,23 +59,36 @@ interface Entry {
   cursor: number | undefined
   waterfalls: Map<string, WatchFrame>
   stopped: boolean
+  /** 当前会话 socket；回退到 SSE 时为 undefined。 */
+  socket: BrainSessionSocket | undefined
 }
 
 export function createSessionWatchers(deps: { brain: BrainClient }): SessionWatchers {
   const entries = new Map<string, Entry>()
 
   const start = (entry: Entry): void => {
+    const call = { userId: entry.key.userId, workspaceId: entry.key.workspaceId, sessionId: entry.key.sessionId }
+    const signal = entry.controller.signal
+
     const run = async (): Promise<void> => {
       try {
-        await deps.brain.sessionFrames(
-          { userId: entry.key.userId, workspaceId: entry.key.workspaceId, sessionId: entry.key.sessionId },
-          entry.controller.signal,
-          (frame) => deliver(entry, frame as WatchFrame),
-        )
+        await deps.brain.openSessionSocket(call, signal, frame => deliver(entry, frame as WatchFrame))
+          .then(socket => new Promise<void>((resolve) => {
+            entry.socket = socket
+            socket.onClose(resolve)
+          }))
       } catch {
-        // 脑不可达：留由下一次订阅重试；已有订阅者会收到断开。
+        // socket 建不起来（入口不支持 Upgrade、旧脑版本）：退回 SSE。
+        if (entry.stopped || signal.aborted) return
+        try {
+          await deps.brain.sessionFrames(call, signal, frame => deliver(entry, frame as WatchFrame))
+        } catch {
+          // 脑不可达：留由下一次订阅重试；已有订阅者会收到断开。
+        }
+      } finally {
+        entry.socket = undefined
       }
-      if (entry.stopped || entry.controller.signal.aborted) return
+      if (entry.stopped || signal.aborted) return
       // 上游断线后短暂重试，直到没有订阅者。
       setTimeout(() => {
         if (!entry.stopped && entry.listeners.size > 0) void run()
@@ -115,6 +140,7 @@ export function createSessionWatchers(deps: { brain: BrainClient }): SessionWatc
           cursor: undefined,
           waterfalls: new Map(),
           stopped: false,
+          socket: undefined,
         }
         entries.set(key.sessionId, entry)
         start(entry)
@@ -160,6 +186,18 @@ export function createSessionWatchers(deps: { brain: BrainClient }): SessionWatc
 
     settle(sessionId, requestId) {
       entries.get(sessionId)?.waterfalls.delete(requestId)
+    },
+
+    async answer(sessionId, requestId, outcome) {
+      // 只认已连上的 socket。超时/中途断开都返回 undefined，由调用方走 REST；
+      // 两条路共用脑上的同一张待答表，重复结算只会得到 false。
+      const socket = entries.get(sessionId)?.socket
+      if (socket === undefined || socket.closed) return undefined
+      try {
+        return await socket.answer(requestId, outcome)
+      } catch {
+        return undefined
+      }
     },
 
     close() {

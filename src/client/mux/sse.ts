@@ -67,6 +67,15 @@ export interface SseRuntime {
   handle(req: IncomingMessage, res: ServerResponse, endpoint: string, deps: SseDeps): Promise<boolean>
   /** `POST P/remote/$mux/open|$mux/close`：在物理流上开/关逻辑通道。 */
   control(req: IncomingMessage, res: ServerResponse, endpoint: string, deps: SseDeps): Promise<boolean>
+  /**
+   * 在任意载体上开一张物理 mux：SSE（`P/sse/$mux`）与浏览器 WSS 共用这一套
+   * 逻辑通道管理。返回 mux id；载体关闭时通道一并关闭。
+   */
+  mount(carrier: Channel, deps: SseDeps): string
+  /** 在已开的物理 mux 上开一条逻辑通道；非法端点/归属不符抛 `HttpError`。 */
+  openChannel(muxId: string, channelId: string, endpoint: string, payload: unknown, deps: SseDeps): Promise<void>
+  /** 关一条逻辑通道；幂等。 */
+  closeChannel(muxId: string, channelId: string, deps: SseDeps): void
   close(): void
 }
 
@@ -691,25 +700,73 @@ export function createSseRuntime(): SseRuntime {
     }
   }
 
-  /** 物理流：发一帧 `ready` 带上 mux id，之后所有逻辑帧都带 `channel`。 */
-  const handleMux = (req: IncomingMessage, res: ServerResponse, deps: SseDeps): void => {
-    const channel = openHttpChannel(req, res)
+  /**
+   * 开一张物理 mux。SSE（`P/sse/$mux`）与浏览器 WSS 只差载体：帧的语义、
+   * 逻辑通道的生命周期、跨成员判定都在这里。
+   */
+  const mount = (carrier: Channel, deps: SseDeps): string => {
     const id = `mux_${randomUUID()}`
-    const entry: MuxEntry = { userId: deps.userId, channel, logical: new Map() }
+    const entry: MuxEntry = { userId: deps.userId, channel: carrier, logical: new Map() }
     muxes.set(id, entry)
-    channel.send({ type: 'ready', mux: id })
-    channel.onClose(() => {
-      muxes.delete(id)
+    carrier.onClose(() => {
+      if (muxes.get(id) === entry) muxes.delete(id)
       for (const logical of entry.logical.values()) logical.close()
       entry.logical.clear()
     })
+    return id
+  }
+
+  /** 物理流：发一帧 `ready` 带上 mux id，之后所有逻辑帧都带 `channel`。 */
+  const handleMux = (req: IncomingMessage, res: ServerResponse, deps: SseDeps): void => {
+    const channel = openHttpChannel(req, res)
+    const id = mount(channel, deps)
+    channel.send({ type: 'ready', mux: id })
   }
 
   /**
-   * `POST P/remote/$mux/open|$mux/close`：控制面。
+   * 在一张物理 mux 上开一条逻辑通道。
    *
    * 只允许在**自己的**物理流上开通道；逻辑端点必须本身是流端点（`$mux` 自身除外）。
-   * 打开失败（归属不符、端点非法）按 Remote 错误信封回，物理流不受影响。
+   * 打开失败按 `HttpError` 抛出，由载体决定回包形式（SSE 走控制请求的信封，
+   * WSS 走带内 `server-response`）。
+   */
+  const openChannel = async (
+    muxId: string,
+    channelId: string,
+    endpoint: string,
+    payload: unknown,
+    deps: SseDeps,
+  ): Promise<void> => {
+    const entry = muxes.get(muxId)
+    if (entry === undefined || entry.userId !== deps.userId) throw new HttpError(404, 'gateway/not-found')
+    if (endpoint === '$mux' || !STREAM_ENDPOINTS.has(endpoint)) throw new HttpError(400, 'gateway/bad-request')
+    if (entry.logical.has(channelId)) throw new HttpError(400, 'gateway/bad-request')
+    const logical = createMuxChannel(entry.channel, channelId)
+    entry.logical.set(channelId, logical)
+    logical.onClose(() => {
+      if (entry.logical.get(channelId) === logical) entry.logical.delete(channelId)
+    })
+    try {
+      await dispatch(endpoint, deps, object(payload) ?? { args: {} }, () => logical)
+    } catch (error) {
+      logical.close()
+      entry.logical.delete(channelId)
+      throw error
+    }
+  }
+
+  /** 关一条逻辑通道；不是自己的 mux 与不存在一样处理。 */
+  const closeChannel = (muxId: string, channelId: string, deps: SseDeps): void => {
+    const entry = muxes.get(muxId)
+    if (entry === undefined || entry.userId !== deps.userId) return
+    entry.logical.get(channelId)?.close()
+    entry.logical.delete(channelId)
+  }
+
+  /**
+   * `POST P/remote/$mux/open|$mux/close`：SSE 载体上的控制面。
+   *
+   * 只允许在**自己的**物理流上开通道；打开失败按 Remote 错误信封回，物理流不受影响。
    */
   const handleMuxControl = async (
     req: IncomingMessage,
@@ -739,36 +796,14 @@ export function createSseRuntime(): SseRuntime {
       writeEnvelope(res, remoteFailed(rpcId, 'gateway/bad-request', 'mux and channel are required.'))
       return true
     }
-    const entry = muxes.get(muxId)
-    if (entry === undefined || entry.userId !== deps.userId) {
-      writeEnvelope(res, remoteFailed(rpcId, 'gateway/not-found', 'The mux stream is not available.'))
-      return true
-    }
     if (endpoint === '$mux/close') {
-      entry.logical.get(channelId)?.close()
-      entry.logical.delete(channelId)
+      closeChannel(muxId, channelId, deps)
       writeEnvelope(res, remoteSucceeded(rpcId, { ok: true }))
       return true
     }
-    const inner = text(args.endpoint)
-    if (inner === undefined || inner === '$mux' || !STREAM_ENDPOINTS.has(inner)) {
-      writeEnvelope(res, remoteFailed(rpcId, 'gateway/bad-request', 'The endpoint is not a stream endpoint.'))
-      return true
-    }
-    if (entry.logical.has(channelId)) {
-      writeEnvelope(res, remoteFailed(rpcId, 'gateway/bad-request', 'The channel is already open.'))
-      return true
-    }
-    const logical = createMuxChannel(entry.channel, channelId)
-    entry.logical.set(channelId, logical)
-    logical.onClose(() => {
-      if (entry.logical.get(channelId) === logical) entry.logical.delete(channelId)
-    })
     try {
-      await dispatch(inner, deps, object(args.payload) ?? { args: {} }, () => logical)
+      await openChannel(muxId, channelId, text(args.endpoint) ?? '', object(args.payload) ?? { args: {} }, deps)
     } catch (error) {
-      logical.close()
-      entry.logical.delete(channelId)
       if (error instanceof HttpError) {
         writeEnvelope(res, remoteFailed(rpcId, mapErrorCode(error.code), error.code, error.details))
         return true
@@ -799,6 +834,9 @@ export function createSseRuntime(): SseRuntime {
     async control(req, res, endpoint, deps) {
       return handleMuxControl(req, res, endpoint, deps)
     },
+    mount,
+    openChannel,
+    closeChannel,
     close() {
       controlSinks.clear()
       for (const entry of projections.values()) {

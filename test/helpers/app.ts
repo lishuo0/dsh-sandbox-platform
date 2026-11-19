@@ -101,7 +101,7 @@ export async function startTestPlatform(options: StartOptions = {}): Promise<Tes
   // 和 src/main.ts 一样先建管理员，测试才能用 config 里的凭据登录。
   await bootstrapAdmin(deps)
   const routes = routeFactories.flatMap((mount) => mount(deps))
-  // 平台没有 Upgrade 面；测试栈也只接统一前缀下的 HTTP 面。
+  // 默认测试栈只接统一前缀下的 HTTP 面；需要 Upgrade 的用例自己装配 surface。
   const server = startHttp(config, database.pool, [...routes, ...(options.extraRoutes ?? [])], {
     handle: async () => false,
   })

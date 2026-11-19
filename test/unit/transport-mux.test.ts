@@ -17,16 +17,52 @@ const SOURCE = readFileSync(new URL('../../src/client/transport-client.js', impo
 interface Harness {
   transport: {
     openStream(endpoint: string, payload: unknown, signal?: AbortSignal): AsyncGenerator<unknown>
+    fetch(input: unknown, init?: { method?: string; body?: string }): Promise<Response>
   }
   push(frame: unknown): void
   closeBody(): void
   gets: string[]
   posts: Array<{ url: string; body: { rpcId: string; method: string; payload: { args: Record<string, unknown> } } }>
+  /** 假浏览器 WebSocket；`socket: false` 的 harness 里为空。 */
+  sockets: FakeSocket[]
 }
 
-function harness(): Harness {
+/** 浏览器 WebSocket 的替身：测试手动决定何时 ready、何时推帧。 */
+class FakeSocket {
+  readonly sent: Array<Record<string, unknown>> = []
+  readyState = 1
+  private readonly listeners = new Map<string, Array<(event: unknown) => void>>()
+  constructor(readonly url: string) {}
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    const list = this.listeners.get(type) ?? []
+    list.push(listener)
+    this.listeners.set(type, list)
+  }
+  send(data: string): void {
+    this.sent.push(JSON.parse(data) as Record<string, unknown>)
+  }
+  close(): void {
+    if (this.readyState === 3) return
+    this.readyState = 3
+    this.emit('close', {})
+  }
+  /** 把一帧当作服务端下行投给页面。 */
+  deliver(frame: unknown): void {
+    this.emit('message', { data: JSON.stringify(frame) })
+  }
+  /** 握手失败：页面应退回 SSE 载体。 */
+  fail(): void {
+    this.emit('error', {})
+  }
+  private emit(type: string, event: unknown): void {
+    for (const listener of this.listeners.get(type) ?? []) listener(event)
+  }
+}
+
+function harness(options: { socket?: boolean } = {}): Harness {
   const gets: string[] = []
   const posts: Harness['posts'] = []
+  const sockets: FakeSocket[] = []
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined
   /** 每次物理 GET 都是一条新流：重连后旧的 `body` 已经 locked/closed。 */
   const newBody = (): ReadableStream<Uint8Array> => new ReadableStream<Uint8Array>({
@@ -54,20 +90,29 @@ function harness(): Harness {
     posts.push({ url, body: parsed })
     return Promise.resolve(ok(parsed.rpcId))
   }
+  class Socket extends FakeSocket {
+    constructor(url: string) {
+      super(url)
+      sockets.push(this)
+    }
+  }
   const context = createContext({
     fetch: fakeFetch,
     TextEncoder,
     TextDecoder,
     URL,
+    Response,
     ReadableStream,
     btoa,
     console,
     setTimeout,
     clearTimeout,
+    location: { protocol: 'http:', host: 'platform.test', origin: 'http://platform.test' },
+    ...(options.socket === true ? { WebSocket: Socket } : {}),
   })
   runInContext(SOURCE, context)
   const transport = (context as unknown as { __DSH_TRANSPORT__: Harness['transport'] }).__DSH_TRANSPORT__
-  return { transport, push, closeBody, gets, posts }
+  return { transport, push, closeBody, gets, posts, sockets }
 }
 
 const tick = async (): Promise<void> => {
@@ -164,5 +209,124 @@ describe('浏览器传输的多路复用', () => {
     await tick()
     abort.abort()
     await expect(againNext).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+describe('浏览器传输的 WSS 载体', () => {
+  it('优先用一条 WSS：带内 open、帧按 channel 分发、关闭也走带内', async () => {
+    const { transport, gets, posts, sockets } = harness({ socket: true })
+    const first = transport.openStream('remoteAccess/follow', { args: {} })
+    const firstNext = first.next()
+    await tick()
+    expect(sockets).toHaveLength(1)
+    expect(gets).toHaveLength(0)
+
+    sockets[0]!.deliver({ type: 'ready', mux: 'mux_ws' })
+    await tick()
+    const open = sockets[0]!.sent.find(message => message.type === 'open')
+    expect(open).toMatchObject({ endpoint: 'remoteAccess/follow' })
+    sockets[0]!.deliver({
+      type: 'server-response',
+      rpcId: open?.rpcId as string,
+      result: { ok: true, value: { ok: true } },
+    })
+    await tick()
+
+    sockets[0]!.deliver({ type: 'frame', channel: open?.channel as string, value: { type: 'baseline', owner: true } })
+    expect(await firstNext).toEqual({ value: { type: 'baseline', owner: true }, done: false })
+
+    // 第二条逻辑流复用同一条 WSS，不再建连接。
+    const second = transport.openStream('$events', { args: {} })
+    const secondNext = second.next()
+    await tick()
+    expect(sockets).toHaveLength(1)
+    const secondOpen = sockets[0]!.sent.filter(message => message.type === 'open')[1]
+    expect(secondOpen).toBeDefined()
+    sockets[0]!.deliver({
+      type: 'server-response',
+      rpcId: secondOpen?.rpcId as string,
+      result: { ok: true, value: { ok: true } },
+    })
+    await tick()
+    sockets[0]!.deliver({
+      type: 'frame',
+      channel: secondOpen?.channel as string,
+      value: { type: 'ready', clientId: 'ws_1' },
+    })
+    expect(await secondNext).toEqual({ value: { type: 'ready', clientId: 'ws_1' }, done: false })
+
+    await first.return(undefined)
+    await tick()
+    expect(sockets[0]!.sent.some(message => message.type === 'close' && message.channel === open?.channel)).toBe(true)
+    expect(posts).toHaveLength(0)
+    await second.return(undefined)
+  })
+
+  it('Upgrade 建不起来时退回 SSE 载体', async () => {
+    const { transport, gets, push, sockets } = harness({ socket: true })
+    const stream = transport.openStream('remoteAccess/follow', { args: {} })
+    const next = stream.next()
+    await tick()
+    expect(sockets).toHaveLength(1)
+
+    sockets[0]!.fail()
+    await tick()
+    expect(gets.filter(url => url.includes('/sse/$mux'))).toHaveLength(1)
+    push({ type: 'ready', mux: 'mux_sse' })
+    await tick()
+    expect(sockets).toHaveLength(1)
+
+    const abort = new AbortController()
+    const again = transport.openStream('remoteAccess/follow', { args: {} }, abort.signal)
+    const againNext = again.next()
+    await tick()
+    abort.abort()
+    await expect(againNext).rejects.toMatchObject({ name: 'AbortError' })
+    void next
+  })
+
+  it('答复带内上行，不再发 HTTP POST', async () => {
+    const { transport, posts, sockets } = harness({ socket: true })
+    const abort = new AbortController()
+    const stream = transport.openStream('remoteAccess/follow', { args: {} }, abort.signal)
+    const next = stream.next()
+    await tick()
+    sockets[0]!.deliver({ type: 'ready', mux: 'mux_ws' })
+    await tick()
+    const open = sockets[0]!.sent.find(message => message.type === 'open')
+    sockets[0]!.deliver({
+      type: 'server-response',
+      rpcId: open?.rpcId as string,
+      result: { ok: true, value: { ok: true } },
+    })
+    await tick()
+
+    const pending = transport.fetch('/api/$events/result', {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'rpc-answer',
+        method: '$events/result',
+        payload: { args: { eventId: 'req_1', outcome: { kind: 'result', value: 'approved' } } },
+      }),
+    })
+    await tick()
+    const answer = sockets[0]!.sent.find(message => message.rpcId === 'rpc-answer')
+    expect(answer).toMatchObject({
+      type: 'answer',
+      eventId: 'req_1',
+      outcome: { kind: 'result', value: 'approved' },
+    })
+    sockets[0]!.deliver({
+      type: 'server-response',
+      rpcId: 'rpc-answer',
+      result: { ok: true, value: { accepted: true } },
+    })
+    const response = await pending
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ result: { ok: true, value: { accepted: true } } })
+    expect(posts).toHaveLength(0)
+    abort.abort()
+    await expect(next).rejects.toMatchObject({ name: 'AbortError' })
   })
 })

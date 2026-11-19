@@ -1,9 +1,10 @@
 /**
  * 会话级实时面的路径与上行体契约。
  *
- * 平台对外的实时面只有一条 SSE：`P/sessions/{id}/stream`，下行帧由脑原样
- * 转发（事件名为 `frame`）。唯一的上行动作是 `POST P/sessions/{id}/answers`，
- * 把一次答复交回脑里正在等待的 answerer。
+ * 浏览器通常走 `P/socket`（成员级 WSS，多条逻辑通道复用）或它的 SSE 回退
+ * `P/sse/$mux`；这里保留单会话直连路径 `P/sessions/{id}/stream` 与
+ * `POST P/sessions/{id}/answers`，给不经过 mux 的调用方与测试使用。下行帧都
+ * 来自脑的会话实时面，形状一致。
  */
 
 /**

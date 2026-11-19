@@ -2,13 +2,15 @@
  * 登录之后把 DSH 客户端页面交给浏览器，并在统一前缀
  * `/dsh-api/platform/v1` 下提供它要的全部接口。
  *
- * 前缀之外没有平台路由：客户端页面不再直接请求脑，也不再建立全局
- * WebSocket。所有 Remote 调用由 `__DSH_TRANSPORT__` 改写到 `P/remote`，
- * 所有逻辑流走 `P/sse`，会话实时面是 `P/sessions/{id}/stream`。
+ * 前缀之外没有平台路由：客户端页面不再直接请求脑，也不再建立脑的全局
+ * WebSocket。所有 Remote 调用由 `__DSH_TRANSPORT__` 改写到 `P/remote`；
+ * 逻辑流首选成员级 WSS `P/socket`（回退 `P/sse/$mux`）；会话实时面另有
+ * `P/sessions/{id}/stream` 直连路径。
  */
 
 import { createReadStream, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { extname, resolve, sep } from 'node:path'
 import { decodeKey, type AppConfig } from '../config.js'
 import type { Db } from '../kernel/db.js'
@@ -27,6 +29,7 @@ import { BOOT_ASSET_PREFIX, matchBootAsset } from './boot-assets.js'
 import { createSessionStreamRelay, type SessionStreamRelay } from './mux/stream.js'
 import { handleRemote, type RemoteDeps } from './mux/router.js'
 import { createSseRuntime, type SseRuntime } from './mux/sse.js'
+import { createMuxSocket } from './mux/socket.js'
 import { createQueueService, type QueueService } from './mux/queue.js'
 import { createSessionWatchers, type SessionWatchers } from './mux/watchers.js'
 import { createForwardedEvents, type ForwardedEvents } from './mux/events.js'
@@ -49,6 +52,12 @@ const TYPES: Record<string, string> = {
 
 export interface ClientSurface {
   handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>
+  /**
+   * 接管属于平台浏览器面的 Upgrade（`P/socket`）。
+   * @returns true 表示已处理；false 交给其它监听者（平台没有别的 Upgrade 面，
+   *   调用方会直接断开）。
+   */
+  upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean
 }
 
 /** 平台页面：未登录看到登录，登录后是跑在平台载体上的 DSH 客户端。 */
@@ -69,22 +78,40 @@ export function createClientSurface(cfg: AppConfig, db: Db, client: ClientHost):
   const watchers = createSessionWatchers({ brain })
   const events = createForwardedEvents()
   const sse = createSseRuntime()
+  // 浏览器侧一条 WSS：所有逻辑流复用，开关与答复带内上行。SSE 是回退载体。
+  const depsOf = (userId: string): RemoteDeps => ({
+    db,
+    objects,
+    brain,
+    credentialsKey,
+    userId,
+    queue,
+    watchers,
+    events,
+  })
+  const socket = createMuxSocket({
+    sse,
+    resolve: async (req) => {
+      const userId = currentUser(cfg, req)
+      if (!userId) return undefined
+      if ((await accessState(db, userId)) !== 'ok') return undefined
+      return { deps: depsOf(userId) }
+    },
+  })
   recoverQueue(db, queue)
   return {
     handle: (req, res) => handle(cfg, db, client, brain, objects, credentialsKey, sessionStream, {
-      queue,
-      watchers,
-      events,
+      depsOf,
       sse,
     }, req, res),
+    upgrade: (req, socketIn, head) => socket.upgrade(req, socketIn, head),
   }
 }
 
 /** 统一前缀下的 Remote 运行时：unary、SSE 与平台输入队列。 */
 interface ClientMux {
-  readonly queue: QueueService
-  readonly watchers: SessionWatchers
-  readonly events: ForwardedEvents
+  /** 按成员组装一次调用的依赖；upgrade 与 HTTP 面共用同一套判定。 */
+  readonly depsOf: (userId: string) => RemoteDeps
   readonly sse: SseRuntime
 }
 
@@ -131,16 +158,7 @@ async function handle(
       res.end('unauthorized')
       return true
     }
-    const deps: RemoteDeps = {
-      db,
-      objects,
-      brain,
-      credentialsKey,
-      userId,
-      queue: mux.queue,
-      watchers: mux.watchers,
-      events: mux.events,
-    }
+    const deps: RemoteDeps = mux.depsOf(userId)
     if (remote !== undefined) {
       // 多路复用控制面：逻辑流的开关必须落在发起它的那条物理流上。
       if (remote === '$mux/open' || remote === '$mux/close') {

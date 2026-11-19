@@ -1111,35 +1111,62 @@ function eventBelongs(eventId: string | undefined, deps: RemoteDeps): { userId: 
   return owner
 }
 
-async function eventsResult(call: RemoteCall, deps: RemoteDeps): Promise<unknown> {
-  const args = argsOf(call)
-  const eventId = text(args.eventId)
-  const owner = eventBelongs(eventId, deps)
+/**
+ * 把一个答复交回脑里正在等待的 answerer。
+ *
+ * 优先在会话 socket 上带内上行：答复和下行是同一条连接，答复一定落在同一条
+ * 会话的脑进程上。没有 socket（旧脑版本、入口不承载 Upgrade）时退回 REST。
+ * 两条路共用脑上的同一张待答表，`false` 只表示请求已经结算过，按终态处理。
+ */
+async function settleAnswer(
+  deps: RemoteDeps,
+  owner: { sessionId: string },
+  requestId: string,
+  outcome: { kind: 'result'; value: unknown } | { kind: 'rejected'; error: string },
+): Promise<void> {
+  const inBand = await deps.watchers.answer(owner.sessionId, requestId, outcome)
+  if (inBand !== undefined) return
   const workspace = await sessionWorkspace(deps.db, deps.objects, deps.userId, owner.sessionId)
   await sendAnswer(deps.brain, {
     userId: deps.userId,
     workspaceId: workspace.id,
     sessionId: owner.sessionId,
-    requestId: eventId as string,
-  }, answerOutcome(args.outcome))
-  deps.events.settle(eventId as string)
-  deps.watchers.settle(owner.sessionId, eventId as string)
-  return { accepted: true }
+    requestId,
+  }, outcome)
+}
+
+async function eventsResult(call: RemoteCall, deps: RemoteDeps): Promise<unknown> {
+  const args = argsOf(call)
+  const eventId = text(args.eventId)
+  if (eventId === undefined) badRequest('gateway/bad-request')
+  return answerForwardedEvent(deps, eventId, args.outcome)
 }
 
 async function answerQuestion(call: RemoteCall, deps: RemoteDeps): Promise<unknown> {
   const args = argsOf(call)
   const callId = text(args.callId)
   if (callId === undefined) badRequest('gateway/bad-request')
+  return answerUserQuestion(deps, callId, args.answer)
+}
+
+/**
+ * 结算 `$events` 上的一张卡片（审批 / 计划评审）。
+ *
+ * HTTP unary 与浏览器 WSS 的带内上行共用这一条；只按当前成员过滤。
+ */
+export async function answerForwardedEvent(deps: RemoteDeps, eventId: string, outcome: unknown): Promise<unknown> {
+  const owner = eventBelongs(eventId, deps)
+  await settleAnswer(deps, owner, eventId, answerOutcome(outcome))
+  deps.events.settle(eventId)
+  deps.watchers.settle(owner.sessionId, eventId)
+  return { accepted: true }
+}
+
+/** 结算一次 `userQuestions` 提问；HTTP 与 WSS 共用。 */
+export async function answerUserQuestion(deps: RemoteDeps, callId: string, answer: unknown): Promise<unknown> {
   const eventId = deps.events.eventOfCall(callId)
   const owner = eventBelongs(eventId, deps)
-  const workspace = await sessionWorkspace(deps.db, deps.objects, deps.userId, owner.sessionId)
-  await sendAnswer(deps.brain, {
-    userId: deps.userId,
-    workspaceId: workspace.id,
-    sessionId: owner.sessionId,
-    requestId: eventId as string,
-  }, { kind: 'result', value: args.answer })
+  await settleAnswer(deps, owner, eventId as string, { kind: 'result', value: answer })
   deps.events.settle(eventId as string)
   deps.watchers.settle(owner.sessionId, eventId as string)
   return true

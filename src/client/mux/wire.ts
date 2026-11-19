@@ -104,7 +104,7 @@ export function requestArg(args: Record<string, unknown>): Record<string, unknow
 
 /** `result.value` 的成功信封。 */
 export function remoteSucceeded(rpcId: string, value: unknown): string {
-  return JSON.stringify({ type: 'server-response', rpcId, result: { ok: true, value } })
+  return JSON.stringify(remoteSucceededValue(rpcId, value))
 }
 
 /** `result.error` 的失败信封；`details` 必须是对象。 */
@@ -114,11 +114,22 @@ export function remoteFailed(
   message: string,
   details: Record<string, unknown> = {},
 ): string {
-  return JSON.stringify({
-    type: 'server-response',
-    rpcId,
-    result: { ok: false, error: { code, message, details } },
-  })
+  return JSON.stringify(remoteFailedValue(rpcId, code, message, details))
+}
+
+/** 与 `remoteSucceeded` 相同的信封，返回对象（WSS 载体直接发对象）。 */
+export function remoteSucceededValue(rpcId: string, value: unknown): unknown {
+  return { type: 'server-response', rpcId, result: { ok: true, value } }
+}
+
+/** 与 `remoteFailed` 相同的信封，返回对象（WSS 载体直接发对象）。 */
+export function remoteFailedValue(
+  rpcId: string,
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): unknown {
+  return { type: 'server-response', rpcId, result: { ok: false, error: { code, message, details } } }
 }
 
 /** 把内部异常收窄成 Remote 的失败码；未预期的异常统一 `gateway/internal`。 */

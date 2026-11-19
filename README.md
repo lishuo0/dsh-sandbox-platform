@@ -28,7 +28,7 @@
 ```mermaid
 flowchart TB
   Browser["浏览器"]
-  Platform["平台<br/>成员 · 模型 · 工作区 · 会话 · 历史 · SSE 接入"]
+  Platform["平台<br/>成员 · 模型 · 工作区 · 会话 · 历史 · 实时接入"]
   Brain["脑<br/>Agent 循环 · 只推理"]
   Sandbox["工作区沙箱<br/>本地 Docker / 部署 E2B"]
   DB[("共享数据库")]
@@ -38,7 +38,7 @@ flowchart TB
   Browser --> Platform
   Platform --> DB
   Platform --> OSS
-  Platform -->|"建会话 · 发消息 · 订阅 SSE"| Brain
+  Platform -->|"建会话 · 发消息 · 订阅实时面"| Brain
   Brain -->|"文件 · 命令"| Sandbox
   Brain --> Model
   OSS -->|"工作区前缀 · 技能前缀"| Sandbox
@@ -51,7 +51,7 @@ flowchart TB
 ```mermaid
 flowchart TB
   Browser["浏览器"]
-  LB["负载均衡 / 反向代理<br/>HTTPS · SSE"]
+  LB["负载均衡 / 反向代理<br/>HTTPS · WSS"]
   Platform["平台（多副本；入口需会话粘性）"]
   Router["脑路由层"]
   Brain["脑（多副本）"]
@@ -60,7 +60,7 @@ flowchart TB
   OSS[("OSS")]
   Model["成员模型服务"]
 
-  Browser -->|"HTTPS / SSE"| LB
+  Browser -->|"HTTPS / WSS"| LB
   LB --> Platform
   Platform -->|"hash(x-dsh-workspace-id)"| Router
   Router --> Brain
@@ -70,9 +70,9 @@ flowchart TB
   OSS -.->|"云端挂载工作区/技能前缀"| Sandbox
 ```
 
-平台只配置一个 `brain.baseUrl`，指向脑路由层。路由层按请求头里的 `x-dsh-workspace-id` 做一致性哈希，同一工作区的请求固定落到同一台脑，这样写租约、沙箱绑定和待答请求不会在副本之间来回跳。目标脑不可达时才漂移到下一台；会话可以用同一个 `sessionId` 从共享数据库恢复，正在跑的这一轮需要重发。
+平台只配置一个 `brain.baseUrl`，指向脑路由层。路由层按请求头里的 `x-dsh-workspace-id` 做一致性哈希，同一工作区的请求——包括会话级 WSS 的 Upgrade 和它的带内答复——固定落到同一台脑，这样写租约、沙箱绑定和待答请求不会在副本之间来回跳。目标脑不可达时才漂移到下一台；会话可以用同一个 `sessionId` 从共享数据库恢复，正在跑的这一轮需要重发。
 
-平台自己的多副本入口需要**会话粘性**：浏览器的一条 `$mux` SSE 和它的审批答复是两次独立请求，待答请求的路由表在副本内存里；落到不同副本时答复会找不到请求。对象存储也要用共享 OSS（`aliyun.oss`），否则附件和工作区文件只留在某一个副本的本地磁盘上。
+平台自己的多副本入口需要**会话粘性**：同一个浏览器的实时连接（`P/socket`）在生命周期内固定在一台副本上，该副本内存里存着这个成员的订阅与待答路由表；连接落到另一台副本就会重新建流。审批答复走同一条连接，不会漂移。对象存储也要用共享 OSS（`aliyun.oss`），否则附件和工作区文件只留在某一个副本的本地磁盘上。
 
 本地开发通常只起一台脑，沙箱由本机 Docker daemon 提供；多副本部署用 E2B，因为本地 `storage.dir` 是单机目录，不适合多台脑共享。
 
@@ -89,7 +89,7 @@ flowchart TB
 
 ## 部署启动
 
-本地需要 Node.js 24.9+：`config.yaml` 不写数据库时就用仓库里的一个 SQLite 文件，不用安装数据库。脑的本地沙箱默认用 Docker（按需为每个工作区起一个容器，首次会拉取 `node:22-bookworm-slim`），需要可用的 Docker daemon；不可用时回退 mock（没有安全隔离）。部署和多副本在 `config.yaml` 里加 `database.url` 换成 PostgreSQL 16，并配好 `aliyun.oss` 让对象跨副本共享；平台入口还要把同一浏览器的请求粘到同一副本（SSE 与审批答复依赖进程内路由）。平台和脑是两个仓库，命令都在各自目录下跑；两个 `dev.sh` 都把进程放后台，命令返回后服务已经在跑，关掉终端不影响。
+本地需要 Node.js 24.9+：`config.yaml` 不写数据库时就用仓库里的一个 SQLite 文件，不用安装数据库。脑的本地沙箱默认用 Docker（按需为每个工作区起一个容器，首次会拉取 `node:22-bookworm-slim`），需要可用的 Docker daemon；不可用时回退 mock（没有安全隔离）。部署和多副本在 `config.yaml` 里加 `database.url` 换成 PostgreSQL 16，并配好 `aliyun.oss` 让对象跨副本共享；平台入口还要把同一浏览器的实时连接粘到同一副本（`P/socket` 依赖进程内订阅）。平台和脑是两个仓库，命令都在各自目录下跑；两个 `dev.sh` 都把进程放后台，命令返回后服务已经在跑，关掉终端不影响。
 
 ```bash
 # 1. 平台：装依赖并启动，监听 3000

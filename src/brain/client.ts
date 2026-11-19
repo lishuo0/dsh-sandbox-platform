@@ -1,6 +1,24 @@
 import type { IncomingMessage } from 'node:http'
 import type { ServerResponse } from 'node:http'
+import { WebSocket } from 'ws'
 import type { AppConfig } from '../config.js'
+
+/** 会话级 WebSocket 的路径；脑文档里唯一的 Upgrade 路由。 */
+const SESSION_SOCKET_PATH = '/brain/v1/session/socket'
+
+/**
+ * 平台到脑的一条会话级 WebSocket。
+ *
+ * 下行帧与脑的 SSE `data:` 完全一致；上行 `answer` 直接把答复交回承载这条
+ * 连接的脑进程，因此不依赖平台副本的粘性或脑路由层的二次判定。
+ */
+export interface BrainSessionSocket {
+  readonly closed: boolean
+  /** 在带内提交一次答复；`true` 表示已被脑结算。 */
+  answer(requestId: string, outcome: unknown): Promise<boolean>
+  close(): void
+  onClose(listener: () => void): void
+}
 
 /** 脑上的一条已提交日志事件；字段与 `dsh_session_events.event` 对齐。 */
 export interface BrainEvent {
@@ -174,6 +192,9 @@ export class BrainClient {
    * 与 `pipeSession` 的区别：这里由平台解析帧，用于合成浏览器侧的
    * `session/follow` / `session/control` / `$events` 载体，而不是原样透传。
    * 连接失败时抛错；调用方负责把它变成业务错误。
+   *
+   * 保留为回退：优先用 `openSessionSocket`，只有 Upgrade 打不通（入口不放行、
+   * 旧版脑）时才回到这条 SSE。两者的帧集相同。
    */
   async sessionFrames(
     input: BrainCall,
@@ -181,6 +202,29 @@ export class BrainClient {
     onFrame: (frame: { readonly type?: string } & Record<string, unknown>) => void,
   ): Promise<void> {
     return this.frames(`/brain/v1/sessions/${input.sessionId}/stream`, input, signal, onFrame)
+  }
+
+  /**
+   * 打开一条会话级 WebSocket。resolve 时握手已完成，之后每一帧都经 `onFrame`
+   * 回调；连接关闭时 `onClose` 触发，调用方据此重连。
+   *
+   * 上行答复走同一条连接（`answer`），所以答复不会落到另一台脑。这条路径
+   * 失败时调用方仍可退回 `sessionFrames` + `answer`（REST）。
+   */
+  openSessionSocket(
+    input: BrainCall,
+    signal: AbortSignal,
+    onFrame: (frame: { readonly type?: string } & Record<string, unknown>) => void,
+  ): Promise<BrainSessionSocket> {
+    return openBrainSocket(this.socketUrl(), this.headers({ ...input, requestId: undefined }, false), signal, onFrame)
+  }
+
+  /** 脑的 `baseUrl` 换成同名 `ws(s)` 地址，保留可能存在的路径前缀。 */
+  private socketUrl(): string {
+    const url = new URL(this.cfg.brain.baseUrl)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}${SESSION_SOCKET_PATH}`
+    return url.toString()
   }
 
   /**
@@ -520,6 +564,138 @@ export class BrainClient {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 等一条带内答复的时间上限；超过就当作这条连接不可用，由调用方走 REST。 */
+const ANSWER_TIMEOUT_MS = 10_000
+
+/**
+ * 建立一条会话 socket。
+ *
+ * 握手失败必须让整个 Promise 失败（调用方据此退回 SSE），所以只有 `open`
+ * 之后的错误才转成关断回调。答复用 `requestId` 对账，脑回的 `ack` 表示已经
+ * 结算，`answer-error` 表示请求已撤销或不属于这条会话。
+ */
+function openBrainSocket(
+  url: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  onFrame: (frame: { readonly type?: string } & Record<string, unknown>) => void,
+): Promise<BrainSessionSocket> {
+  if (signal.aborted) return Promise.reject(new Error('aborted'))
+  const ws = new WebSocket(url, { headers })
+  const waiters = new Map<string, { resolve: (ok: boolean) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
+  const listeners: Array<() => void> = []
+  let closed = false
+
+  const finish = (error?: Error): void => {
+    if (closed) return
+    closed = true
+    for (const waiter of waiters.values()) {
+      clearTimeout(waiter.timer)
+      waiter.reject(error ?? new Error('brain-socket-closed'))
+    }
+    waiters.clear()
+    for (const listener of listeners) {
+      try {
+        listener()
+      } catch {
+        /* 单个清理失败不影响其它清理 */
+      }
+    }
+  }
+
+  const abort = (): void => {
+    try {
+      ws.close()
+    } catch {
+      /* 已经关掉 */
+    }
+    finish(new Error('aborted'))
+  }
+  signal.addEventListener('abort', abort, { once: true })
+
+  ws.on('close', () => finish())
+  ws.on('error', () => finish(new Error('brain-socket-error')))
+  ws.on('message', (data) => {
+    let frame: unknown
+    try {
+      frame = JSON.parse(typeof data === 'string' ? data : data.toString())
+    } catch {
+      return
+    }
+    if (typeof frame !== 'object' || frame === null) return
+    const type = (frame as { type?: unknown }).type
+    if (type === 'ack' || type === 'answer-error') {
+      const requestId = (frame as { requestId?: unknown }).requestId
+      if (typeof requestId !== 'string') return
+      const waiter = waiters.get(requestId)
+      if (waiter === undefined) return
+      waiters.delete(requestId)
+      clearTimeout(waiter.timer)
+      waiter.resolve(type === 'ack')
+      return
+    }
+    onFrame(frame as { readonly type?: string } & Record<string, unknown>)
+  })
+
+  return new Promise<BrainSessionSocket>((resolve, reject) => {
+    const fail = (error: Error): void => {
+      signal.removeEventListener('abort', abort)
+      finish(error)
+      try {
+        ws.close()
+      } catch {
+        /* 未握手时 close 可能抛，忽略 */
+      }
+      reject(error)
+    }
+    ws.once('open', () => {
+      resolve({
+        get closed() {
+          return closed
+        },
+        answer(requestId, outcome) {
+          if (closed || ws.readyState !== WebSocket.OPEN) {
+            return Promise.reject(new Error('brain-socket-closed'))
+          }
+          return new Promise<boolean>((answerResolve, answerReject) => {
+            const timer = setTimeout(() => {
+              waiters.delete(requestId)
+              answerReject(new Error('brain-answer-timeout'))
+            }, ANSWER_TIMEOUT_MS)
+            timer.unref?.()
+            waiters.set(requestId, { resolve: answerResolve, reject: answerReject, timer })
+            ws.send(JSON.stringify({ type: 'answer', requestId, outcome }))
+          })
+        },
+        close() {
+          signal.removeEventListener('abort', abort)
+          try {
+            ws.close()
+          } catch {
+            /* 已经关掉 */
+          }
+          finish(new Error('brain-socket-closed'))
+        },
+        onClose(listener) {
+          if (closed) {
+            try {
+              listener()
+            } catch {
+              /* ignore */
+            }
+            return
+          }
+          listeners.push(listener)
+        },
+      })
+    })
+    ws.once('error', (error) => fail(error instanceof Error ? error : new Error(String(error))))
+    ws.once('unexpected-response', (_request, response) => {
+      fail(new Error(`brain-unreachable: HTTP ${response.statusCode ?? 0}`))
+    })
+  })
 }
 
 /** 脑的 SSE 帧格式固定为 `event: frame` + `data: <JSON>`；注释行直接忽略。 */

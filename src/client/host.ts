@@ -100,9 +100,9 @@ export async function startClientHost(): Promise<ClientHost> {
   const indexHtml = renderIndexInjections(
     readFileSync(resolve(shellRoot, 'index.html'), 'utf8'),
     [
-      // 客户端 boot 之前先装传输适配：unary Remote 走 `P/remote`，逻辑流走
-      // `P/sse`，页面不再建立全局 WebSocket。脚本按内容哈希的静态资产下发，
-      // 不内联进 HTML。
+      // 客户端 boot 之前先装传输适配：unary Remote 走 `P/remote`，逻辑流首选
+      // 成员级 WSS `P/socket`、回退 `P/sse`；页面不再直连脑的全局 WebSocket。
+      // 脚本按内容哈希的静态资产下发，不内联进 HTML。
       { kind: 'script-src', placement: 'head', src: bootAsset('transport').url },
       ...bootInjections(graph),
       {

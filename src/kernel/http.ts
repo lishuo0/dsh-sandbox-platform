@@ -51,8 +51,11 @@ export function startHttp(cfg: AppConfig, db: Db, routes: Route[], surface: Clie
       await dispatch(cfg, db, compiled, req, res)
     })()
   })
-  // 平台没有 Upgrade 面：客户端所有逻辑流都走统一前缀下的 SSE。未注册
-  // `upgrade` 监听时 Node 会直接断开（非 101），不会把浏览器放进任何隧道。
+  // 唯一的 Upgrade 面是浏览器 mux socket（`P/socket`）。其它路径一律断开：
+  // 不认识的 Upgrade 不能变成隧道，也不能被当成普通请求放过去。
+  server.on('upgrade', (req, socket, head) => {
+    if (!surface.upgrade(req, socket, head) && !socket.destroyed) socket.destroy()
+  })
   server.listen(cfg.http.port, cfg.http.host)
   return server
 }

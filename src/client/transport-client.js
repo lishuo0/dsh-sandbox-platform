@@ -13,9 +13,13 @@
  *   `<页面相对路径 api/<endpoint>`；这里改写成 `P/remote/<endpoint>`，请求体原样
  *   转发（`{type:'client-request', rpcId, method, payload}`）。
  * - 逻辑流：`connection.rpc.open('/api', endpoint, payload, signal)` 复用一条
- *   `GET P/sse/$mux` 物理流，用 `POST P/remote/$mux/open|$mux/close` 开关逻辑通道，
- *   逐帧 `data:` 解出 `{type:'frame',channel,value}` 后 yield。
- *   客户端见到 `open` 存在就不会启动它的 WebSocket 多路复用，页面不再建立全局 WSS。
+ *   浏览器级物理连接，逐帧解出 `{type:'frame',channel,value}` 后 yield。
+ *   物理连接**首选一条 WSS**（`P/socket`）：所有逻辑流、开关与交互答复都在
+ *   这一条上复用，浏览器连接数恒等于 1。Upgrade 建不起来时退回 SSE
+ *   `P/sse/$mux`（原有实现，保留为回退）；两种载体的帧集相同。
+ * - 交互答复：`$events/result` 与 `userQuestions/answer` 在 WSS 可用时带内上行
+ *   （`{type:'answer'}` / `{type:'questions-answer'}`），和下行落在同一条连接上；
+ *   没有 WSS 时照旧 POST。
  * - 上传：`fileUpload` 的 `postRaw` 用 `__DSH_FILE_UPLOAD__.fetch(path, init)`；
  *   这里把 `api/session/uploadFileBinary?<query>` 改写到 `P/upload?<query>`。
  */
@@ -24,6 +28,9 @@
   var globals = globalThis
   /** 原生 fetch：下面会把 `globalThis.fetch` 包一层，内部一律用它避免自递归。 */
   var nativeFetch = globalThis.fetch.bind(globalThis)
+
+  /** 走带内上行的答复端点：WSS 可用时不占 unary 请求。 */
+  var IN_BAND_ANSWERS = { '$events/result': 'answer', 'userQuestions/answer': 'questions-answer' }
 
   /** 页面里的相对路由统一按站点根解析，避免被当前 history 路径带偏。 */
   function routeOf(input) {
@@ -50,6 +57,11 @@
     }
     var endpoint = path.slice(4)
     if (endpoint === '') return failure('gateway/not-found', 'The endpoint is missing.', 404)
+    // 交互答复是这条页面最热的两条 unary：WSS 在时带内上行，不必再开请求。
+    if (IN_BAND_ANSWERS[endpoint] !== undefined) {
+      var answered = await inBandAnswer(endpoint, init).catch(function () { return undefined })
+      if (answered !== undefined) return answered
+    }
     return globalThis.fetch(prefix + '/remote/' + endpoint + url.search, init)
   }
 
@@ -120,34 +132,151 @@
 
   var mux = null
 
+  /**
+   * 浏览器级物理连接：一条 WSS 承载所有逻辑流。
+   *
+   * 首选 `P/socket`。Upgrade 被入口挡住（反代没配、旧页面）时退回
+   * `P/sse/$mux`——帧集完全相同，逻辑流的开关从带内消息换成
+   * `POST $mux/open|$mux/close`。
+   */
   function muxHandle() {
     if (mux !== null) return mux
-    var state = { id: null, channels: new Map(), closed: false, ready: null, resolveReady: null, rejectReady: null }
+    var state = {
+      id: null,
+      mode: 'sse',
+      channels: new Map(),
+      /** 带内请求（open / 答复）的 rpcId → 等待者。 */
+      pending: new Map(),
+      closed: false,
+      ready: null,
+      resolveReady: null,
+      rejectReady: null,
+      send: null,
+    }
     state.ready = new Promise(function (resolve, reject) {
       state.resolveReady = resolve
       state.rejectReady = reject
     })
-    var promise = (async function () {
-      var response = await nativeFetch(prefix + '/sse/$mux', {
-        method: 'GET',
-        credentials: 'same-origin',
-        cache: 'no-store',
-        headers: { accept: 'text/event-stream' },
-      })
-      if (!response.ok || response.body === null) {
-        throw new Error('Remote mux stream failed with HTTP ' + String(response.status))
-      }
-      void pumpMux(state, response.body)
-      return state
-    })()
+    var promise = connectMux(state)
     var handle = { promise: promise, state: state }
     mux = handle
-    // 物理流建不起来时清掉缓存，下一次 `openStream` 重新连。
+    // 物理连接建不起来时清掉缓存，下一次 `openStream` 重新连。
     promise.catch(function () {
       if (mux !== null && mux.promise === promise) mux = null
       state.rejectReady(new Error('Remote mux stream is unavailable'))
     })
     return handle
+  }
+
+  async function connectMux(state) {
+    if (typeof globalThis.WebSocket === 'function') {
+      try {
+        await openSocketMux(state)
+        return state
+      } catch (error) {
+        /* 退回 SSE */
+      }
+    }
+    var response = await nativeFetch(prefix + '/sse/$mux', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { accept: 'text/event-stream' },
+    })
+    if (!response.ok || response.body === null) {
+      throw new Error('Remote mux stream failed with HTTP ' + String(response.status))
+    }
+    state.mode = 'sse'
+    void pumpMux(state, response.body)
+    return state
+  }
+
+  function socketUrl() {
+    var scheme = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return scheme + '//' + globalThis.location.host + prefix + '/socket'
+  }
+
+  /** 打开 WSS 载体；只有收到平台的 `ready` 才算建好。 */
+  function openSocketMux(state) {
+    return new Promise(function (resolve, reject) {
+      var ws
+      try {
+        ws = new WebSocket(socketUrl())
+      } catch (error) {
+        reject(error)
+        return
+      }
+      var opened = false
+      var settled = false
+      var timer = setTimeout(function () {
+        failOpen(new Error('Remote mux socket timed out'))
+      }, 10000)
+      function failOpen(error) {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try {
+          ws.close()
+        } catch (closeError) {
+          /* 未握手 */
+        }
+        reject(error)
+      }
+      ws.addEventListener('error', function () {
+        failOpen(new Error('Remote mux socket failed'))
+      })
+      ws.addEventListener('close', function () {
+        // `ready` 之前断开只算这次尝试失败，由调用方退回 SSE；之后才关整个载体。
+        if (!opened) {
+          failOpen(new Error('Remote mux socket closed before ready'))
+          return
+        }
+        failMux(state, new Error('Remote mux socket closed'))
+      })
+      ws.addEventListener('message', function (event) {
+        if (typeof event.data !== 'string') return
+        var frame
+        try {
+          frame = JSON.parse(event.data)
+        } catch (error) {
+          return
+        }
+        if (frame === null || typeof frame !== 'object') return
+        if (frame.type === 'ready') {
+          state.id = String(frame.mux)
+          state.mode = 'ws'
+          state.send = function (message) {
+            if (ws.readyState !== 1) return false
+            try {
+              ws.send(JSON.stringify(message))
+              return true
+            } catch (error) {
+              return false
+            }
+          }
+          if (settled) return
+          settled = true
+          opened = true
+          clearTimeout(timer)
+          state.resolveReady(state)
+          resolve(state)
+          return
+        }
+        if (frame.type === 'server-response') {
+          var waiter = state.pending.get(String(frame.rpcId))
+          if (waiter === undefined) return
+          state.pending.delete(String(frame.rpcId))
+          clearTimeout(waiter.timer)
+          waiter.resolve(frame)
+          return
+        }
+        var sink = state.channels.get(String(frame.channel))
+        if (sink === undefined) return
+        if (frame.type === 'frame') sink.deliver(frame.value)
+        else if (frame.type === 'error') sink.finish(errorFrom(frame.error))
+        else if (frame.type === 'end') sink.finish(undefined)
+      })
+    })
   }
 
   async function pumpMux(state, body) {
@@ -196,6 +325,11 @@
     state.closed = true
     state.channels.forEach(function (sink) { sink.finish(error) })
     state.channels.clear()
+    state.pending.forEach(function (waiter) {
+      clearTimeout(waiter.timer)
+      waiter.reject(error)
+    })
+    state.pending.clear()
     state.rejectReady(error)
     if (mux !== null && mux.state === state) mux = null
   }
@@ -204,6 +338,11 @@
     return 'c_' + Math.random().toString(36).slice(2) + Date.now().toString(36)
   }
 
+  function rpcIdOf(kind, key) {
+    return 'm-' + kind + '-' + String(key) + '-' + Math.random().toString(36).slice(2)
+  }
+
+  /** SSE 载体的控制面：POST 一次小 JSON。 */
   function muxCall(method, args, options) {
     return nativeFetch(prefix + '/remote/' + method, {
       method: 'POST',
@@ -219,6 +358,77 @@
     })
   }
 
+  /** WSS 载体的带内请求：等一条同 rpcId 的 `server-response`。 */
+  function muxRequest(state, message) {
+    if (state.mode !== 'ws' || state.send === null || state.closed) {
+      return Promise.reject(new Error('Remote mux socket is unavailable'))
+    }
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        state.pending.delete(message.rpcId)
+        reject(new Error('Remote mux request timed out'))
+      }, 15000)
+      state.pending.set(message.rpcId, { resolve: resolve, reject: reject, timer: timer })
+      if (!state.send(message)) {
+        clearTimeout(timer)
+        state.pending.delete(message.rpcId)
+        reject(new Error('Remote mux socket is closed'))
+      }
+    })
+  }
+
+  /** 关闭一条逻辑通道；物理连接断了就是空操作。 */
+  function muxClose(state, channel) {
+    if (state.closed || state.id === null) return
+    if (state.mode === 'ws') {
+      if (state.send !== null) state.send({ type: 'close', channel: channel })
+      return
+    }
+    void muxCall('$mux/close', { mux: state.id, channel: channel }, { keepalive: true }).catch(function () {
+      /* 物理流已断时关闭是幂等的 */
+    })
+  }
+
+  /**
+   * 交互答复带内上行。
+   *
+   * @returns 合成好的 `Response`；没有 WSS 或消息形状不认识时 undefined，
+   *   调用方退回 POST。
+   */
+  async function inBandAnswer(endpoint, init) {
+    if (mux === null) return undefined
+    var state = mux.state
+    if (state.mode !== 'ws' || state.id === null || state.closed) return undefined
+    var body = init !== undefined ? init.body : undefined
+    if (typeof body !== 'string') return undefined
+    var parsed
+    try {
+      parsed = JSON.parse(body)
+    } catch (error) {
+      return undefined
+    }
+    var payload = parsed !== null && typeof parsed === 'object' ? parsed.payload : undefined
+    var args = payload !== null && typeof payload === 'object' ? payload.args : undefined
+    if (args === null || typeof args !== 'object') return undefined
+    // 回包要带调用方自己的 rpcId，客户端按它认领结果。
+    var rpcId = typeof parsed.rpcId === 'string' ? parsed.rpcId : rpcIdOf('answer', endpoint)
+    var message = { type: IN_BAND_ANSWERS[endpoint], rpcId: rpcId }
+    if (message.type === 'answer') {
+      if (typeof args.eventId !== 'string') return undefined
+      message.eventId = args.eventId
+      message.outcome = args.outcome
+    } else {
+      if (typeof args.callId !== 'string') return undefined
+      message.callId = args.callId
+      message.answer = args.answer
+    }
+    var frame = await muxRequest(state, message)
+    return new Response(JSON.stringify(frame), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
   async function* openStream(endpoint, payload, signal) {
     if (signal !== undefined && signal !== null && signal.aborted) throw abortError()
     var handle = muxHandle()
@@ -227,20 +437,41 @@
     var channel = channelId()
     var sink = makeSink()
     state.channels.set(channel, sink)
-    var opener = await muxCall('$mux/open', {
-      mux: state.id,
-      channel: channel,
-      endpoint: endpoint,
-      payload: payload == null ? { args: {} } : payload,
-    })
-    if (!opener.ok) {
+    var body = payload == null ? { args: {} } : payload
+    try {
+      if (state.mode === 'ws') {
+        var response = await muxRequest(state, {
+          type: 'open',
+          rpcId: rpcIdOf('open', channel),
+          channel: channel,
+          endpoint: endpoint,
+          payload: body,
+        })
+        var result = response.result
+        if (result === null || typeof result !== 'object' || result.ok !== true) {
+          state.channels.delete(channel)
+          throw errorFrom(result !== null && typeof result === 'object' ? result.error : undefined)
+        }
+      } else {
+        var opener = await muxCall('$mux/open', {
+          mux: state.id,
+          channel: channel,
+          endpoint: endpoint,
+          payload: body,
+        })
+        if (!opener.ok) {
+          state.channels.delete(channel)
+          throw new Error('Remote stream ' + endpoint + ' failed with HTTP ' + String(opener.status))
+        }
+        var opened = JSON.parse(await opener.text())
+        if (typeof opened !== 'object' || opened === null || !opened.result || opened.result.ok !== true) {
+          state.channels.delete(channel)
+          throw errorFrom(opened !== null && typeof opened === 'object' && opened.result ? opened.result.error : undefined)
+        }
+      }
+    } catch (error) {
       state.channels.delete(channel)
-      throw new Error('Remote stream ' + endpoint + ' failed with HTTP ' + String(opener.status))
-    }
-    var opened = JSON.parse(await opener.text())
-    if (typeof opened !== 'object' || opened === null || !opened.result || opened.result.ok !== true) {
-      state.channels.delete(channel)
-      throw errorFrom(opened !== null && typeof opened === 'object' && opened.result ? opened.result.error : undefined)
+      throw error
     }
     var onAbort = function () { sink.finish(abortError()) }
     if (signal !== undefined && signal !== null) {
@@ -256,11 +487,7 @@
     } finally {
       if (signal !== undefined && signal !== null) signal.removeEventListener('abort', onAbort)
       if (state.channels.get(channel) === sink) state.channels.delete(channel)
-      if (!state.closed) {
-        void muxCall('$mux/close', { mux: state.id, channel: channel }, { keepalive: true }).catch(function () {
-          /* 物理流已断时关闭是幂等的 */
-        })
-      }
+      muxClose(state, channel)
     }
   }
 
