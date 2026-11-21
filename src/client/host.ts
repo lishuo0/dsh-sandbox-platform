@@ -21,6 +21,8 @@ import { platformConsole } from './console.js'
 import { workspaceCreate } from './workspace-create.js'
 import { filesUpload } from './files-upload.js'
 import { platformModelSettings } from './model-settings.js'
+import { integrationsPage } from './integrations.js'
+import { ticketsPage } from './tickets.js'
 import { bootAsset } from './boot-assets.js'
 
 export interface ClientHost {
@@ -131,6 +133,10 @@ export async function startClientHost(): Promise<ClientHost> {
       { kind: 'html', placement: 'body', html: workspaceCreate() },
       // 右侧文件树的页头上传按钮：文件直接写进工作区的对象前缀。
       { kind: 'html', placement: 'body', html: filesUpload() },
+      // 头像菜单的「集成」：飞书机器人、群与工作区绑定、GitHub 仓库。
+      { kind: 'html', placement: 'body', html: integrationsPage() },
+      // 左侧菜单的「工单任务」：群里接的活和当前进度。
+      { kind: 'html', placement: 'body', html: ticketsPage() },
       // DSH 客户端没有账号入口，登录身份由平台补充在侧边栏左下角。
       { kind: 'html', placement: 'body', html: userBadge() },
       // 首次登录强制改密 / 账号菜单的「修改密码」共用这个弹窗。

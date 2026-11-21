@@ -18,6 +18,7 @@ import { opsRoutes } from '../../src/modules/ops/routes.js'
 import { scheduleRoutes } from '../../src/modules/schedule/routes.js'
 import { sessionRoutes } from '../../src/modules/sessions/routes.js'
 import { skillRoutes } from '../../src/modules/skills/routes.js'
+import { superagentRoutes } from '../../src/modules/superagent/routes.js'
 import { workspaceRoutes } from '../../src/modules/workspaces/routes.js'
 import { createTestDatabase, testSecrets, type TestDatabase } from './pg.js'
 
@@ -34,6 +35,7 @@ const routeFactories = [
   feedbackRoutes,
   attachmentRoutes,
   scheduleRoutes,
+  superagentRoutes,
   opsRoutes,
 ]
 

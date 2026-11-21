@@ -39,6 +39,13 @@ describe('登录身份条', () => {
     expect(html).not.toContain('renderAdminMenu')
   })
 
+  it('头像菜单里有「集成」，打开自己的渠道与绑定页', () => {
+    const html = userBadge()
+    expect(html).toContain('id="dsh-account-integrations"')
+    expect(html).toContain('>集成</span>')
+    expect(html).toContain('window.__dshIntegrationsOpen')
+  })
+
   it('退出登录在账号菜单里', () => {
     const html = userBadge()
     expect(html).toContain('id="dsh-account-logout"')

@@ -310,6 +310,40 @@ describe('登录后的客户端外壳', () => {
     // 设置 → 模型改为平台自有页，读写 /dsh-api/platform/v1/settings/model。
     expect(html).toContain('id="dsh-platform-models"')
     expect(html).toContain('/dsh-api/platform/v1/settings/model')
+    // 协议类型和 DSH 客户端一致：OpenAI 兼容 / Responses / Anthropic / Gemini。
+    expect(html).toContain('name="api"')
+    expect(html).toContain('value="openai-responses"')
+    expect(html).toContain('value="anthropic-messages"')
+    expect(html).toContain('value="google-generative-ai"')
+  })
+
+  it('集成页和工单任务页随外壳下发，都钉在侧栏右侧', async () => {
+    const response = await fetch(`${baseUrl}/`, { headers: { cookie } })
+    const html = await response.text()
+    // 头像菜单的「集成」：飞书机器人 + 群与工作区绑定。
+    expect(html).toContain('id="dsh-account-integrations"')
+    expect(html).toContain('window.__dshIntegrationsOpen')
+    expect(html).toContain('id="dsh-integrations"')
+    expect(html).toContain('/superagent/channels')
+    expect(html).toContain('/superagent/bindings')
+    // 修改机器人 / 绑定在卡片原位展开表单，不在页面顶部另起一块。
+    expect(html).toContain('channelFormBody(channel)')
+    expect(html).toContain('bindingFormBody(binding)')
+    expect(html).toContain("state.form === 'channel' && state.editing === channel.id")
+    // 群列表不用手填：选好机器人自动拉取，机器人卡片也能直接进入绑定。
+    expect(html).toContain('data-act="channel-bind"')
+    expect(html).toContain('syncChats()')
+    // 左侧菜单的「工单任务」：自己的工单和执行进度。
+    expect(html).toContain('id="dsh-tickets"')
+    expect(html).toContain("'dsh-tickets-menu'")
+    expect(html).toContain('/superagent/tickets')
+    expect(html).toContain('window.__dshTicketsOpen')
+    // 列表正文默认折两行，长回复点「展开全文」再看完整内容。
+    expect(html).toContain('.dsh-ticket-note.clamp{display:-webkit-box;-webkit-line-clamp:2')
+    expect(html).toContain('data-act="expand"')
+    expect(html).toContain('展开全文')
+    // 两个页面都用设置页同款钉法，不遮住左侧菜单。
+    expect(html).toContain('inset:0 0 0 var(--dsh-platform-sidebar-width,280px)')
   })
 
   it('启动图不再包含 Agent 预设客户端包', async () => {
@@ -318,7 +352,6 @@ describe('登录后的客户端外壳', () => {
     expect(html).not.toContain('@deepseek-ai/dsh-client-ui-agent-preset')
     expect(html).toContain('@deepseek-ai/dsh-client-ui-settings-general')
   })
-
   it('启动图包含后台任务的读/停面板与 Remote 命名空间', async () => {
     const response = await fetch(`${baseUrl}/`, { headers: { cookie } })
     const html = await response.text()
@@ -536,6 +569,8 @@ describe('登录后的客户端外壳', () => {
     expect(adopted).toBeDefined()
     expect(adopted!.headers['x-dsh-model-key']).toBe('sk-platform-secret')
     expect(adopted!.headers['x-dsh-model-base-url']).toBe('https://api.example.com/v1')
+    // 老配置没有协议字段，按 OpenAI 兼容下发，脑据此选 `user` 路由。
+    expect(adopted!.headers['x-dsh-model-api']).toBe('openai-completions')
     expect(adopted!.headers['x-dsh-model-id']).toBe('deepseek-chat')
     expect(adopted!.headers['x-dsh-model-ids']).toBe('deepseek-chat,deepseek-reasoner')
     expect(adopted!.headers['x-dsh-workspace-id']).toBe(defaultId)

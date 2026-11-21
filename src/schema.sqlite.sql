@@ -276,3 +276,150 @@ CREATE TABLE IF NOT EXISTS dsh_usage_cursors (
   session_id text PRIMARY KEY,
   seq integer NOT NULL DEFAULT 0
 );
+
+-- ---- 工单自动化（superagent） -------------------------------------------
+
+-- 成员自己接入的渠道：飞书机器人 / GitHub App。凭据属于成员本人，管理员不代配。
+CREATE TABLE IF NOT EXISTS dsh_superagent_channels (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  provider text NOT NULL CHECK (provider IN ('feishu', 'github')),
+  name text NOT NULL DEFAULT '',
+  app_id text NOT NULL,
+  -- 新建绑定时继承的默认接活规则（每个元素一句大白话）；单个绑定仍可覆盖。
+  default_rules text NOT NULL DEFAULT '[]',
+  secret_ciphertext blob NOT NULL,
+  secret_key_version integer NOT NULL DEFAULT 1,
+  config text NOT NULL DEFAULT '{}',
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'error')),
+  last_error text,
+  last_event_at text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE (user_id, provider, app_id)
+);
+
+-- 一个群绑定一块工作区。绑定属于成员：同一个人一个群只能绑一块工作区，
+-- 不同成员可以各自绑同一个群、各自看到自己的工单。
+CREATE TABLE IF NOT EXISTS dsh_superagent_bindings (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  channel_id text NOT NULL REFERENCES dsh_superagent_channels(id) ON DELETE CASCADE,
+  workspace_id text NOT NULL REFERENCES dsh_workspaces(id) ON DELETE CASCADE,
+  external_chat_id text NOT NULL,
+  chat_name text NOT NULL DEFAULT '',
+  policy text NOT NULL DEFAULT '{}',
+  policy_version integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused')),
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE (user_id, channel_id, external_chat_id)
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_bindings_lookup
+  ON dsh_superagent_bindings (channel_id, external_chat_id, status);
+
+-- 收到的每条消息先落这里再做去重：同一条消息重投不能接两次活。
+CREATE TABLE IF NOT EXISTS dsh_superagent_messages (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  binding_id text NOT NULL REFERENCES dsh_superagent_bindings(id) ON DELETE CASCADE,
+  channel_id text NOT NULL,
+  external_chat_id text NOT NULL,
+  external_message_id text NOT NULL,
+  thread_key text NOT NULL,
+  sender_id text NOT NULL DEFAULT '',
+  sender_name text NOT NULL DEFAULT '',
+  body text NOT NULL,
+  addressed integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'accepted', 'ignored', 'skipped', 'failed')),
+  prompt_version text,
+  provider text,
+  model text,
+  input_tokens integer,
+  output_tokens integer,
+  decision text,
+  last_error text,
+  received_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  evaluated_at text,
+  UNIQUE (channel_id, external_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_messages_pending
+  ON dsh_superagent_messages (binding_id, status, received_at);
+
+CREATE TABLE IF NOT EXISTS dsh_superagent_tickets (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  binding_id text NOT NULL REFERENCES dsh_superagent_bindings(id) ON DELETE CASCADE,
+  channel_id text NOT NULL,
+  workspace_id text NOT NULL,
+  thread_key text NOT NULL,
+  external_root_id text,
+  title text NOT NULL,
+  scope text NOT NULL,
+  reason text NOT NULL,
+  intent_evidence text NOT NULL,
+  rules text NOT NULL DEFAULT '[]',
+  stage text NOT NULL DEFAULT 'accepted'
+    CHECK (stage IN ('accepted', 'working', 'review', 'done', 'failed', 'stopped')),
+  session_id text,
+  message_id text,
+  auto_merge integer NOT NULL DEFAULT 0,
+  outcome text NOT NULL DEFAULT '{}',
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  closed_at text
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_tickets_owner
+  ON dsh_superagent_tickets (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_tickets_thread
+  ON dsh_superagent_tickets (binding_id, thread_key, stage);
+
+CREATE TABLE IF NOT EXISTS dsh_superagent_assignments (
+  id text PRIMARY KEY,
+  ticket_id text NOT NULL REFERENCES dsh_superagent_tickets(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  generation integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+  session_id text,
+  lease_owner text,
+  lease_until text,
+  attempt_count integer NOT NULL DEFAULT 0,
+  last_error text,
+  started_at text,
+  finished_at text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_assignments_due
+  ON dsh_superagent_assignments (status, lease_until);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_assignments_ticket
+  ON dsh_superagent_assignments (ticket_id, generation DESC);
+
+CREATE TABLE IF NOT EXISTS dsh_superagent_outbox (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  channel_id text NOT NULL REFERENCES dsh_superagent_channels(id) ON DELETE CASCADE,
+  external_chat_id text NOT NULL,
+  thread_root_id text,
+  kind text NOT NULL CHECK (kind IN ('reply', 'ack', 'report', 'decline')),
+  body text NOT NULL DEFAULT '{}',
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'dead')),
+  attempt_count integer NOT NULL DEFAULT 0,
+  next_attempt_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  lease_owner text,
+  lease_until text,
+  last_error text,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  sent_at text
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_outbox_due
+  ON dsh_superagent_outbox (status, next_attempt_at);

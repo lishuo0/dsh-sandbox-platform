@@ -391,6 +391,7 @@ export async function openSession(
     cwd: WORKSPACE_GUEST_ROOT,
     modelKey: model.apiKey,
     modelBaseUrl: model.baseUrl,
+    modelApi: model.api,
     modelId: model.modelId,
     modelIds: model.modelIds,
   })
@@ -415,6 +416,7 @@ export async function resumeSession(db: Querier, brain: BrainClient, key: Buffer
     cwd: WORKSPACE_GUEST_ROOT,
     modelKey: model.apiKey,
     modelBaseUrl: model.baseUrl,
+    modelApi: model.api,
     modelId: model.modelId,
     modelIds: model.modelIds,
   })
@@ -455,6 +457,7 @@ export async function postMessage(
     cwd: WORKSPACE_GUEST_ROOT,
     modelKey: model.apiKey,
     modelBaseUrl: model.baseUrl,
+    modelApi: model.api,
     modelId: model.modelId,
     modelIds: model.modelIds,
   })
@@ -474,6 +477,7 @@ export async function postMessage(
     requestId,
     modelKey: model.apiKey,
     modelBaseUrl: model.baseUrl,
+    modelApi: model.api,
     modelId: model.modelId,
     modelIds: model.modelIds,
   })
@@ -495,6 +499,7 @@ export async function switchModel(db: Querier, brain: BrainClient, key: Buffer, 
     sessionId: session.id,
     modelKey: model.apiKey,
     modelBaseUrl: model.baseUrl,
+    modelApi: model.api,
     modelId: model.modelId,
     modelIds: model.modelIds,
   })
@@ -559,6 +564,7 @@ async function ensureActive(db: Querier, brain: BrainClient, key: Buffer, userId
     cwd: WORKSPACE_GUEST_ROOT,
     modelKey: model.apiKey,
     modelBaseUrl: model.baseUrl,
+    modelApi: model.api,
     modelId: model.modelId,
     modelIds: model.modelIds,
   })
@@ -591,6 +597,7 @@ export async function composerCall(
     body,
     modelKey: model.apiKey,
     modelBaseUrl: model.baseUrl,
+    modelApi: model.api,
     modelId: model.modelId,
     modelIds: model.modelIds,
   })

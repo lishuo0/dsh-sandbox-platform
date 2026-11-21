@@ -51,6 +51,9 @@ const MARKUP = `<div id="dsh-platform-models" hidden data-open="false" aria-hidd
   gap: 12px;
 }
 #dsh-platform-models[hidden]{display:none!important}
+/* 宿主分区容器（上游 div.options）上挂这个属性：里面的上游分区整体让位。
+   用规则而不是逐个节点改 style，React 重渲染换了节点也不会闪。 */
+[data-dsh-pm-host="true"]>:not(#dsh-platform-models){display:none!important}
 #dsh-platform-models *,#dsh-platform-models *::before,#dsh-platform-models *::after{box-sizing:border-box}
 #dsh-platform-models .pm-title{margin:0;font-size:16px;line-height:24px;font-weight:500;color:var(--pm-label)}
 #dsh-platform-models .pm-intro{margin:0;font-size:14px;line-height:22px;color:var(--pm-label-3)}
@@ -186,13 +189,22 @@ const MARKUP = `<div id="dsh-platform-models" hidden data-open="false" aria-hidd
     </button>
     <div id="dsh-pm-add-card" class="pm-add-card pm-hidden" hidden>
       <div class="pm-editor-header"><span class="pm-editor-title">自定义模型 API</span></div>
-      <p class="pm-hint">连接中转站、自部署服务或其他兼容 OpenAI 协议的接口，需填写 API 地址、密钥和模型。</p>
+      <p class="pm-hint">连接中转站、自部署服务或其他模型接口：先选协议类型，再填 API 地址、密钥和模型。</p>
       <div id="dsh-pm-add-editor"></div>
     </div>
   </div>
 </section>
 <template id="dsh-pm-editor-tpl">
   <form class="pm-editor" novalidate>
+    <label class="pm-field">
+      <span class="pm-label">协议类型</span>
+      <select class="pm-input" name="api">
+        <option value="openai-completions">OpenAI 兼容（Chat Completions）</option>
+        <option value="openai-responses">OpenAI Responses</option>
+        <option value="anthropic-messages">Anthropic Messages</option>
+        <option value="google-generative-ai">Google Gemini</option>
+      </select>
+    </label>
     <label class="pm-field">
       <span class="pm-label">API 地址</span>
       <input class="pm-input" name="baseUrl" type="url" required placeholder="https://api.example.com/v1" autocomplete="off">

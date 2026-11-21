@@ -13,6 +13,8 @@ import {
 type ProviderBody = {
   displayName?: string
   baseUrl?: string
+  /** 上游线协议；不传就用默认的 OpenAI 兼容。 */
+  api?: string
   apiKey?: string
   modelIds?: string[]
   defaultModel?: string
@@ -122,6 +124,7 @@ export function modelRoutes(deps: Deps): Route[] {
         const data = await createProvider(deps.db, deps.credentialsKey, ctx.actor!.id, {
           displayName: body.displayName,
           baseUrl: body.baseUrl ?? '',
+          api: body.api,
           apiKey: body.apiKey,
           modelIds: body.modelIds ?? [],
           defaultModel: body.defaultModel ?? '',
@@ -138,6 +141,7 @@ export function modelRoutes(deps: Deps): Route[] {
         const data = await updateProvider(deps.db, deps.credentialsKey, ctx.actor!.id, ctx.params.id, {
           displayName: body.displayName,
           baseUrl: body.baseUrl ?? '',
+          api: body.api,
           apiKey: body.apiKey,
           modelIds: body.modelIds ?? [],
           defaultModel: body.defaultModel ?? '',

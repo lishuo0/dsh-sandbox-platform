@@ -29,9 +29,10 @@
   let editingId = null
   let creating = false
   let host = null
-  let hidden = null
   let syncing = false
   let syncTimer = 0
+  let loading = false
+  let loadStartedAt = 0
 
   const settingsPanel = () => document.querySelector('[data-shortcut-modal="settings"]')
 
@@ -69,6 +70,14 @@
     return json.data
   }
 
+  /** 协议的产品名；值本身是脑的适配器认的标识符。 */
+  const PROTOCOL_LABELS = {
+    'openai-completions': 'OpenAI 兼容',
+    'openai-responses': 'OpenAI Responses',
+    'anthropic-messages': 'Anthropic',
+    'google-generative-ai': 'Google Gemini',
+  }
+
   function cloneEditor() {
     return editorTpl.content.firstElementChild.cloneNode(true)
   }
@@ -101,9 +110,11 @@
 
   function bindEditor(form, opts) {
     const keyInput = form.querySelector('input[name="apiKey"]')
+    const protocolSelect = form.querySelector('select[name="api"]')
     const keyHint = form.querySelector('.pm-key-hint')
     const keyToggle = form.querySelector('.pm-key-toggle')
     form.querySelector('input[name="baseUrl"]').value = opts.baseUrl || ''
+    if (protocolSelect) protocolSelect.value = opts.api || 'openai-completions'
     if (opts.configured && opts.apiKeyMasked) {
       keyInput.placeholder = opts.apiKeyMasked
       keyHint.textContent = '已保存密钥；留空表示不修改。输入新值将覆盖。'
@@ -155,6 +166,7 @@
       const apiKey = keyInput.value.trim()
       const body = {
         baseUrl,
+        api: protocolSelect ? protocolSelect.value : 'openai-completions',
         modelIds,
         defaultModel: modelIds[0] || '',
       }
@@ -204,6 +216,7 @@
       'model-config-required': '请填写 API 地址和至少一个模型',
       'default-model-not-listed': '默认模型必须在模型列表中',
       'model-api-key-required': '首次配置必须填写 API 密钥',
+      'model-protocol-invalid': '协议类型不认识，请重新选择',
       'provider-not-found': '提供商不存在或已删除',
     })[code] || code
   }
@@ -241,7 +254,7 @@
       li.innerHTML = `<div class="pm-row-head">
         <span class="pm-row-identity">
           <span class="pm-row-name"></span>
-          <span class="pm-row-tag">自定义</span>
+          <span class="pm-row-tag"></span>
           <span class="pm-dot" data-ok="${provider.configured ? 'true' : 'false'}" role="img"
             aria-label="${provider.configured ? '已配置密钥' : '缺少密钥'}"
             title="${provider.configured ? '已配置密钥' : '缺少密钥'}"></span>
@@ -252,6 +265,7 @@
         </span>
       </div>`
       li.querySelector('.pm-row-name').textContent = provider.displayName || provider.baseUrl
+      li.querySelector('.pm-row-tag').textContent = PROTOCOL_LABELS[provider.api] || '自定义'
 
       li.querySelector('[data-action="edit"]').addEventListener('click', (event) => {
         event.preventDefault()
@@ -272,6 +286,7 @@
         const form = cloneEditor()
         bindEditor(form, {
           baseUrl: provider.baseUrl,
+          api: provider.api || 'openai-completions',
           modelIds: provider.modelIds || [],
           configured: provider.configured,
           apiKeyMasked: provider.apiKeyMasked || '',
@@ -309,6 +324,8 @@
   }
 
   async function load() {
+    if (loading) return
+    loading = true
     setError('')
     try {
       page = await api('GET', API)
@@ -322,6 +339,7 @@
               id: 'legacy',
               displayName: legacy.baseUrl,
               baseUrl: legacy.baseUrl,
+              api: legacy.api || 'openai-completions',
               modelIds: legacy.modelIds || [],
               defaultModel: legacy.defaultModel || '',
               apiKeyMasked: legacy.apiKeyMasked || '',
@@ -334,43 +352,57 @@
       render()
     } catch (error) {
       setError(mapError(error))
+    } finally {
+      loading = false
     }
   }
 
-  function findUpstreamModels(panel) {
-    for (const el of panel.querySelectorAll('div,section,article,main')) {
-      if (root.contains(el)) continue
+  /**
+   * 设置面板里装分区的那一块（上游叫 `options`）。
+   *
+   * 只按结构认，不能按文字猜：导航、分区容器、分区自身、分区里的段落都带着
+   * 同样的说明文字，按文字找会一层层往下漂，挂载点跟着乱跳，页面就一直闪。
+   */
+  function sectionHost(panel) {
+    const nav = panel.querySelector('nav')
+    const usable = (el) => el !== root && !root.contains(el) && !(nav && (el === nav || el.contains(nav)))
+    for (const el of panel.children) {
+      if (!usable(el)) continue
+      if (String(el.className || '').includes('_options')) return el
+    }
+    // 老壳没有可读的类名：退回「直接子节点里带模型说明文字、且不含导航」的那块。
+    for (const el of panel.children) {
+      if (!usable(el)) continue
       const text = el.textContent || ''
-      if (!MARKERS.some((marker) => text.includes(marker))) continue
-      if (text.length > 8000) continue
-      let node = el
-      for (let i = 0; i < 6 && node && node !== panel; i += 1) {
-        const own = node.childNodes.length <= 12 || (node.textContent || '').length < 4000
-        if (own && node.parentElement && node.parentElement !== panel) return node
-        node = node.parentElement
-      }
-      return el
+      if (MARKERS.some((marker) => text.includes(marker))) return el
     }
     return null
   }
 
+  /** 导航栏当前选中的分区文字；老壳没有 aria-current 时返回 undefined。 */
+  function selectedNavLabel(panel) {
+    const nav = panel.querySelector('nav')
+    if (!nav) return undefined
+    const selected = nav.querySelector('[aria-current="true"], [aria-selected="true"], [data-active="true"], .active')
+    return selected ? (selected.textContent || '').trim() : undefined
+  }
+
   function isModelsNavActive(panel) {
-    const selected = panel.querySelector('[aria-selected="true"], [aria-current="page"], .active, [data-active="true"]')
-    if (selected) {
-      const label = (selected.textContent || '').trim()
-      if (label === '模型' || label === 'Models') return true
-    }
-    // 编辑展开时仍以「当前挂在设置面板里」为准，避免误判关掉。
-    if (root.dataset.open === 'true' && panel.contains(root)) return true
-    return MARKERS.some((marker) => (panel.textContent || '').includes(marker))
+    // 只看导航选中项。页面已经挂进面板、正在编辑，都不能算「还停在模型页」——
+    // 否则切到通用设置后这里仍返回 true，模型页就一直盖在上面。
+    const label = selectedNavLabel(panel)
+    if (label !== undefined) return label === '模型' || label === 'Models'
+    // 老壳没有可读的选中标记：分区容器里还有上游模型区块就算停在模型页。
+    const section = sectionHost(panel)
+    if (section === null) return false
+    return [...section.children].some((el) =>
+      el !== root && !root.contains(el) && MARKERS.some((marker) => (el.textContent || '').includes(marker)))
   }
 
   function detach() {
-    if (hidden) {
-      hidden.style.removeProperty('display')
-      hidden = null
-    }
-    if (host && root.parentElement === host) document.body.appendChild(root)
+    if (host) host.removeAttribute('data-dsh-pm-host')
+    // 上游分区可能已经被 React 卸载，连带把根节点摘掉：无论如何先放回 body。
+    if (root.parentElement !== document.body) document.body.appendChild(root)
     host = null
     root.hidden = true
     root.dataset.open = 'false'
@@ -379,19 +411,28 @@
   }
 
   function attach(panel) {
-    const upstream = findUpstreamModels(panel)
-    const mount = upstream?.parentElement || panel
+    const section = sectionHost(panel)
+    const mount = section || panel
     if (root.parentElement !== mount) mount.appendChild(root)
-    if (upstream && upstream !== root) {
-      if (upstream.style.display !== 'none') upstream.style.display = 'none'
-      hidden = upstream
+    // 藏上游分区靠容器上的属性 + 一条 CSS 规则，而不是逐个节点改 style：
+    // React 重渲染会换掉分区节点，逐个改必然闪；规则对之后挂上来的节点立即生效。
+    if (section !== null && section.getAttribute('data-dsh-pm-host') !== 'true') {
+      section.setAttribute('data-dsh-pm-host', 'true')
     }
-    host = mount
+    host = section
     if (root.hidden || root.dataset.open !== 'true') {
       root.hidden = false
       root.dataset.open = 'true'
     }
-    if (!loaded || !(page?.providers?.length)) void load()
+    ensureLoaded()
+  }
+
+  function ensureLoaded() {
+    if (loaded || loading) return
+    // 失败后不要跟着每次 DOM 变更重试，隔两秒再说。
+    if (Date.now() - loadStartedAt < 2000) return
+    loadStartedAt = Date.now()
+    void load()
   }
 
   function sync() {
@@ -444,7 +485,6 @@
   const watch = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       if (mutation.target === root || root.contains(mutation.target)) continue
-      if (hidden && mutation.target === hidden) continue
       scheduleSync()
       return
     }

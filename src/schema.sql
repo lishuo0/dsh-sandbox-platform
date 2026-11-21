@@ -274,3 +274,153 @@ CREATE TABLE IF NOT EXISTS dsh_usage_cursors (
   session_id text PRIMARY KEY,
   seq bigint NOT NULL DEFAULT 0
 );
+
+-- ---- 工单自动化（superagent） -------------------------------------------
+
+-- 成员自己接入的渠道：飞书机器人 / GitHub App。凭据属于成员本人，管理员不代配。
+CREATE TABLE IF NOT EXISTS dsh_superagent_channels (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  provider text NOT NULL CHECK (provider IN ('feishu', 'github')),
+  name text NOT NULL DEFAULT '',
+  app_id text NOT NULL,
+  -- 新建绑定时继承的默认接活规则（每个元素一句大白话）；单个绑定仍可覆盖。
+  default_rules jsonb NOT NULL DEFAULT '[]',
+  secret_ciphertext bytea NOT NULL,
+  secret_key_version integer NOT NULL DEFAULT 1,
+  config jsonb NOT NULL DEFAULT '{}',
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'error')),
+  last_error text,
+  last_event_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, provider, app_id)
+);
+
+-- 一个群绑定一块工作区。绑定属于成员：同一个人一个群只能绑一块工作区，
+-- 不同成员可以各自绑同一个群、各自看到自己的工单。
+CREATE TABLE IF NOT EXISTS dsh_superagent_bindings (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  channel_id text NOT NULL REFERENCES dsh_superagent_channels(id) ON DELETE CASCADE,
+  workspace_id text NOT NULL REFERENCES dsh_workspaces(id) ON DELETE CASCADE,
+  external_chat_id text NOT NULL,
+  chat_name text NOT NULL DEFAULT '',
+  policy jsonb NOT NULL DEFAULT '{}',
+  policy_version integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, channel_id, external_chat_id)
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_bindings_lookup
+  ON dsh_superagent_bindings (channel_id, external_chat_id, status);
+
+-- 收到的每条消息先落这里再做去重：同一条消息重投不能接两次活。
+-- 评估的模型与用量也记在这行，评估不建会话，用量进不了 dsh_session_events。
+CREATE TABLE IF NOT EXISTS dsh_superagent_messages (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  binding_id text NOT NULL REFERENCES dsh_superagent_bindings(id) ON DELETE CASCADE,
+  channel_id text NOT NULL,
+  external_chat_id text NOT NULL,
+  external_message_id text NOT NULL,
+  thread_key text NOT NULL,
+  sender_id text NOT NULL DEFAULT '',
+  sender_name text NOT NULL DEFAULT '',
+  body text NOT NULL,
+  addressed boolean NOT NULL DEFAULT true,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'accepted', 'ignored', 'skipped', 'failed')),
+  prompt_version text,
+  provider text,
+  model text,
+  input_tokens bigint,
+  output_tokens bigint,
+  decision jsonb,
+  last_error text,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  evaluated_at timestamptz,
+  UNIQUE (channel_id, external_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_messages_pending
+  ON dsh_superagent_messages (binding_id, status, received_at);
+
+CREATE TABLE IF NOT EXISTS dsh_superagent_tickets (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  binding_id text NOT NULL REFERENCES dsh_superagent_bindings(id) ON DELETE CASCADE,
+  channel_id text NOT NULL,
+  workspace_id text NOT NULL,
+  thread_key text NOT NULL,
+  external_root_id text,
+  title text NOT NULL,
+  scope text NOT NULL,
+  reason text NOT NULL,
+  intent_evidence text NOT NULL,
+  rules jsonb NOT NULL DEFAULT '[]',
+  stage text NOT NULL DEFAULT 'accepted'
+    CHECK (stage IN ('accepted', 'working', 'review', 'done', 'failed', 'stopped')),
+  session_id text,
+  message_id text,
+  auto_merge boolean NOT NULL DEFAULT false,
+  outcome jsonb NOT NULL DEFAULT '{}',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  closed_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_tickets_owner
+  ON dsh_superagent_tickets (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_tickets_thread
+  ON dsh_superagent_tickets (binding_id, thread_key, stage);
+
+-- 一次工单执行：认领用租约，换代次后旧执行写回无效，和定时任务同一套做法。
+CREATE TABLE IF NOT EXISTS dsh_superagent_assignments (
+  id text PRIMARY KEY,
+  ticket_id text NOT NULL REFERENCES dsh_superagent_tickets(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  generation integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+  session_id text,
+  lease_owner text,
+  lease_until timestamptz,
+  attempt_count integer NOT NULL DEFAULT 0,
+  last_error text,
+  started_at timestamptz,
+  finished_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_assignments_due
+  ON dsh_superagent_assignments (status, lease_until);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_assignments_ticket
+  ON dsh_superagent_assignments (ticket_id, generation DESC);
+
+-- 回给群里的消息：先落库再发，发失败按 next_attempt_at 重试。
+CREATE TABLE IF NOT EXISTS dsh_superagent_outbox (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+  channel_id text NOT NULL REFERENCES dsh_superagent_channels(id) ON DELETE CASCADE,
+  external_chat_id text NOT NULL,
+  thread_root_id text,
+  kind text NOT NULL CHECK (kind IN ('reply', 'ack', 'report', 'decline')),
+  body jsonb NOT NULL DEFAULT '{}',
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'dead')),
+  attempt_count integer NOT NULL DEFAULT 0,
+  next_attempt_at timestamptz NOT NULL DEFAULT now(),
+  lease_owner text,
+  lease_until timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  sent_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS dsh_superagent_outbox_due
+  ON dsh_superagent_outbox (status, next_attempt_at);

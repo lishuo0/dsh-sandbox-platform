@@ -86,8 +86,85 @@ export async function migrate(db: Db): Promise<void> {
     sqlite: `ALTER TABLE dsh_users ADD COLUMN must_change_password integer NOT NULL DEFAULT 0`,
     postgres: `ALTER TABLE dsh_users ADD COLUMN must_change_password boolean NOT NULL DEFAULT false`,
   })
+  // 机器人级默认接活规则：新建绑定没配规则时继承，单个绑定仍可覆盖。老渠道视为没配。
+  const defaultRules = db.dialect === 'sqlite' ? `'[]'` : `'[]'::jsonb`
+  await addColumnIfMissing(db, 'dsh_superagent_channels', 'default_rules', {
+    sqlite: `ALTER TABLE dsh_superagent_channels ADD COLUMN default_rules text NOT NULL DEFAULT ${defaultRules}`,
+    postgres: `ALTER TABLE dsh_superagent_channels ADD COLUMN default_rules jsonb NOT NULL DEFAULT ${defaultRules}`,
+  })
+  // 渠道从「只有飞书」扩到飞书 / GitHub：新库直接吃新 schema，老库要改 CHECK 约束。
+  await widenChannelProvider(db)
   await db.exec(readFileSync(file, 'utf8'))
   await migrateLegacyModelProviders(db)
+}
+
+/**
+ * 把 `dsh_superagent_channels.provider` 的约束从「只有飞书」放宽到「飞书 / GitHub」。
+ *
+ * PostgreSQL 换约束就行；SQLite 不支持改 CHECK，只能按官方建议重建表——
+ * 期间关掉外键，避免 DROP 时把引用渠道的绑定 / 消息 / 回信按级联删掉。
+ */
+async function widenChannelProvider(db: Db): Promise<void> {
+  if (db.dialect === 'postgres') {
+    const found = await db.query<{ conname: string }>(
+      `SELECT conname FROM pg_constraint
+        WHERE conrelid = to_regclass('dsh_superagent_channels') AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%provider%'`,
+    )
+    if (found.rows.length === 0) return
+    for (const row of found.rows) {
+      await db.exec(`ALTER TABLE dsh_superagent_channels DROP CONSTRAINT "${row.conname}"`)
+    }
+    await db.exec(
+      `ALTER TABLE dsh_superagent_channels ADD CONSTRAINT dsh_superagent_channels_provider_check
+         CHECK (provider IN ('feishu', 'github'))`,
+    )
+    return
+  }
+  const table = await db.query<{ sql: string }>(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dsh_superagent_channels'`,
+  )
+  const sql = table.rows[0]?.sql ?? ''
+  if (!sql.includes(`'feishu'`) || sql.includes(`'github'`)) return
+  await db.exec(`PRAGMA foreign_keys = OFF`)
+  try {
+    await db.exec(`BEGIN IMMEDIATE`)
+    try {
+      await db.exec(`
+        CREATE TABLE dsh_superagent_channels_new (
+          id text PRIMARY KEY,
+          user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+          provider text NOT NULL CHECK (provider IN ('feishu', 'github')),
+          name text NOT NULL DEFAULT '',
+          app_id text NOT NULL,
+          default_rules text NOT NULL DEFAULT '[]',
+          secret_ciphertext blob NOT NULL,
+          secret_key_version integer NOT NULL DEFAULT 1,
+          config text NOT NULL DEFAULT '{}',
+          status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'error')),
+          last_error text,
+          last_event_at text,
+          created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+          updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+          UNIQUE (user_id, provider, app_id)
+        );
+        INSERT INTO dsh_superagent_channels_new
+          (id, user_id, provider, name, app_id, default_rules, secret_ciphertext,
+           secret_key_version, config, status, last_error, last_event_at, created_at, updated_at)
+        SELECT id, user_id, provider, name, app_id, default_rules, secret_ciphertext,
+               secret_key_version, config, status, last_error, last_event_at, created_at, updated_at
+        FROM dsh_superagent_channels;
+        DROP TABLE dsh_superagent_channels;
+        ALTER TABLE dsh_superagent_channels_new RENAME TO dsh_superagent_channels;
+      `)
+      await db.exec(`COMMIT`)
+    } catch (error) {
+      await db.exec(`ROLLBACK`).catch(() => undefined)
+      throw error
+    }
+  } finally {
+    await db.exec(`PRAGMA foreign_keys = ON`)
+  }
 }
 
 /** 把旧的单行 `dsh_user_models` 迁到可多条的 `dsh_user_model_providers`。 */

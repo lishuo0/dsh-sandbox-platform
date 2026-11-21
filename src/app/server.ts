@@ -12,6 +12,7 @@ import { opsRoutes } from '../modules/ops/routes.js'
 import { scheduleRoutes } from '../modules/schedule/routes.js'
 import { sessionRoutes } from '../modules/sessions/routes.js'
 import { skillRoutes } from '../modules/skills/routes.js'
+import { superagentRoutes } from '../modules/superagent/routes.js'
 import { workspaceRoutes } from '../modules/workspaces/routes.js'
 
 /** 新能力在这里挂上自己的路由。模块之间不互相注册。 */
@@ -26,6 +27,7 @@ const modules: Array<(deps: Deps) => Route[]> = [
   feedbackRoutes,
   attachmentRoutes,
   scheduleRoutes,
+  superagentRoutes,
   opsRoutes,
 ]
 

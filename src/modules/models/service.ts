@@ -7,6 +7,32 @@ import { maskSecret, open, seal } from '../../kernel/seal.js'
 const KIND = 'model-api-key'
 
 /**
+ * 成员可选的上游线协议，顺序和脑的适配器一致。
+ *
+ * 协议不是展示字段：脑会给每种协议单独一条 provider 路由，选错了就会
+ * 拿 OpenAI 的请求格式去打 Anthropic / Gemini 的端点。
+ */
+export const MODEL_PROTOCOLS = [
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages',
+  'google-generative-ai',
+] as const
+
+export type ModelProtocol = (typeof MODEL_PROTOCOLS)[number]
+
+export const DEFAULT_MODEL_PROTOCOL: ModelProtocol = 'openai-completions'
+
+/** 校验成员选的协议；空值用默认，未知名 422。 */
+export function asProtocol(value: unknown): ModelProtocol {
+  if (value === undefined || value === null || value === '') return DEFAULT_MODEL_PROTOCOL
+  if (typeof value === 'string' && (MODEL_PROTOCOLS as readonly string[]).includes(value)) {
+    return value as ModelProtocol
+  }
+  throw new HttpError(422, 'model-protocol-invalid')
+}
+
+/**
  * 公网地址必须 https：密钥会随每次调用发到那里。本机/内网允许 http，
  * 方便直接接本地起的兼容 OpenAI 服务。
  */
@@ -73,6 +99,8 @@ export interface ModelView {
 export interface ResolvedModel {
   baseUrl: string
   modelId: string
+  /** 上游线协议；脑按它选对应的 provider 路由。 */
+  api: string
   /** 这个成员所有提供商的模型并集；脑按它登记客户端可选的模型。 */
   modelIds: string[]
   apiKey: string
@@ -159,9 +187,10 @@ export async function createProvider(
   db: Querier,
   key: Buffer,
   userId: string,
-  input: { displayName?: string; baseUrl: string; apiKey?: string; modelIds: string[]; defaultModel: string },
+  input: { displayName?: string; baseUrl: string; api?: string; apiKey?: string; modelIds: string[]; defaultModel: string },
 ): Promise<ProviderView> {
   const baseUrl = normalizeBaseUrl(input.baseUrl)
+  const api = asProtocol(input.api)
   const modelIds = normalizedModelIds(input.modelIds)
   const defaultModel = (input.defaultModel.trim() || modelIds[0] || '').trim()
   const apiKey = input.apiKey?.trim() ?? ''
@@ -177,8 +206,8 @@ export async function createProvider(
   const sortOrder = Number(order.rows[0]?.n ?? 0)
   await db.query(
     `INSERT INTO dsh_user_model_providers (id, user_id, display_name, base_url, api, model_ids, default_model, sort_order)
-     VALUES ($1, $2, $3, $4, 'openai-completions', $5, $6, $7)`,
-    [id, userId, displayName, baseUrl, modelIds, defaultModel, sortOrder],
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [id, userId, displayName, baseUrl, api, modelIds, defaultModel, sortOrder],
   )
   await db.query(
     `INSERT INTO dsh_user_credentials (user_id, kind, name, ciphertext)
@@ -197,11 +226,16 @@ export async function updateProvider(
   key: Buffer,
   userId: string,
   id: string,
-  input: { displayName?: string; baseUrl: string; apiKey?: string; modelIds: string[]; defaultModel: string },
+  input: { displayName?: string; baseUrl: string; api?: string; apiKey?: string; modelIds: string[]; defaultModel: string },
 ): Promise<ProviderView> {
-  const existing = await db.query(`SELECT 1 FROM dsh_user_model_providers WHERE id = $1 AND user_id = $2`, [id, userId])
+  const existing = await db.query<{ api: string }>(
+    `SELECT api FROM dsh_user_model_providers WHERE id = $1 AND user_id = $2`,
+    [id, userId],
+  )
   if (!existing.rowCount) throw new HttpError(404, 'provider-not-found')
   const baseUrl = normalizeBaseUrl(input.baseUrl)
+  // 不传 api 表示「保持原协议」；显式传空串才回到默认。
+  const api = input.api === undefined ? existing.rows[0]?.api || DEFAULT_MODEL_PROTOCOL : asProtocol(input.api)
   const modelIds = normalizedModelIds(input.modelIds)
   const defaultModel = (input.defaultModel.trim() || modelIds[0] || '').trim()
   const apiKey = input.apiKey?.trim() ?? ''
@@ -217,16 +251,16 @@ export async function updateProvider(
   if (displayName === undefined) {
     await db.query(
       `UPDATE dsh_user_model_providers
-       SET base_url = $3, model_ids = $4, default_model = $5, updated_at = now()
+       SET base_url = $3, api = $4, model_ids = $5, default_model = $6, updated_at = now()
        WHERE id = $1 AND user_id = $2`,
-      [id, userId, baseUrl, modelIds, defaultModel],
+      [id, userId, baseUrl, api, modelIds, defaultModel],
     )
   } else {
     await db.query(
       `UPDATE dsh_user_model_providers
-       SET display_name = $3, base_url = $4, model_ids = $5, default_model = $6, updated_at = now()
+       SET display_name = $3, base_url = $4, api = $5, model_ids = $6, default_model = $7, updated_at = now()
        WHERE id = $1 AND user_id = $2`,
-      [id, userId, displayName, baseUrl, modelIds, defaultModel],
+      [id, userId, displayName, baseUrl, api, modelIds, defaultModel],
     )
   }
   if (apiKey) {
@@ -269,7 +303,7 @@ export async function saveModel(
   db: Querier,
   key: Buffer,
   userId: string,
-  input: { baseUrl: string; apiKey?: string; modelIds: string[]; defaultModel: string },
+  input: { baseUrl: string; api?: string; apiKey?: string; modelIds: string[]; defaultModel: string },
 ): Promise<void> {
   const page = await listProviders(db, key, userId)
   if (page.providers[0]) {
@@ -304,5 +338,5 @@ export async function resolveModel(db: Querier, key: Buffer, userId: string, sel
   ])
   const ciphertext = secret.rows[0]?.ciphertext === undefined ? undefined : asBuffer(secret.rows[0].ciphertext)
   if (!ciphertext) return undefined
-  return { baseUrl: owner.baseUrl, modelId, modelIds: allIds, apiKey: open(key, ciphertext) }
+  return { baseUrl: owner.baseUrl, modelId, api: owner.api || DEFAULT_MODEL_PROTOCOL, modelIds: allIds, apiKey: open(key, ciphertext) }
 }

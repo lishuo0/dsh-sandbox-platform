@@ -50,6 +50,47 @@ export interface AppConfig {
     timeoutMs?: number;
     balanceTimeoutMs?: number;
   };
+  /**
+   * 工单接单的部署级兜底：成员没在机器人上配默认规则时用这里的。
+   * 部署方改这一层就能定制默认接活范围，不必改代码。
+   */
+  superagent?: SuperagentConfig;
+}
+
+export interface SuperagentConfig {
+  /** 绑定一条规则都没配时，用这些默认规则兜底（一句一条）。 */
+  defaultRules?: string[];
+}
+
+/**
+ * 校验并归一 `config.yaml` 的 `superagent` 段。
+ * 写错了就让部署直接失败：静默降级会让人以为规则生效了，其实没有。
+ */
+export function parseSuperagentConfig(raw: unknown): SuperagentConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("config.yaml 的 superagent 必须是一个对象");
+  }
+  const { defaultRules, defaultAcceptMode } = raw as {
+    defaultRules?: unknown;
+    defaultAcceptMode?: unknown;
+  };
+  if (defaultAcceptMode !== undefined) {
+    throw new Error(
+      "config.yaml 的 superagent.defaultAcceptMode 已移除：现在只在群里 @ 机器人或私聊时处理",
+    );
+  }
+  const parsed: SuperagentConfig = {};
+  if (defaultRules !== undefined) {
+    if (!Array.isArray(defaultRules) || defaultRules.some((line) => typeof line !== "string")) {
+      throw new Error("config.yaml 的 superagent.defaultRules 必须是字符串数组");
+    }
+    const rules = defaultRules
+      .map((line) => (line as string).trim())
+      .filter((line) => line !== "");
+    if (rules.length > 0) parsed.defaultRules = rules;
+  }
+  return parsed;
 }
 
 export interface ModelPrice {
@@ -69,6 +110,8 @@ export function loadConfig(): AppConfig {
   const raw = yaml.load(readFileSync(file, "utf8"));
   if (!raw || typeof raw !== "object") throw new Error("config.yaml 不是一份配置");
   const cfg = raw as AppConfig;
+  // 接单兜底写错时要让部署起不来，而不是悄悄用默认值。
+  cfg.superagent = parseSuperagentConfig(cfg.superagent);
   // 写 file 用指定的 SQLite 文件；写 url 接 PostgreSQL；都没写就用本地默认 SQLite。
   const dbFile = cfg.database?.file?.trim() ?? "";
   if (dbFile) {

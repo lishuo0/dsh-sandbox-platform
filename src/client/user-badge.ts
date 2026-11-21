@@ -3,8 +3,8 @@
  *
  * DSH 客户端没有账号入口，平台从 `/auth/me` 取姓名和角色。
  * 点头像弹出账号菜单：设置打开官方设置右侧页，再在设置里进「通用设置 / 模型」；
- * 退出登录也在菜单里。管理员多一个「管理」入口，打开设置页同款的
- * 管理面板（左栏是用户 / 沙箱）。
+ * 「集成」打开自己的飞书机器人与群绑定页；退出登录也在菜单里。管理员多一个
+ * 「管理」入口，打开设置页同款的管理面板（左栏是用户 / 沙箱）。
  * Skills / MCP 是左侧菜单的一级入口，不放在这里。
  */
 
@@ -17,6 +17,8 @@ const LOGOUT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const KEY_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M17 6l2 2M14.5 8.5l2 2"/></svg>`
 
 const ADMIN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 2.8v5.4c0 4.3-2.9 7.6-7 9.8-4.1-2.2-7-5.5-7-9.8V5.8z"/><path d="M9.2 12l2 2 3.6-3.8"/></svg>`
+
+const INTEGRATIONS_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v4M15 3v4"/><path d="M7 7h10v3.5A5 5 0 0 1 12 15.5 5 5 0 0 1 7 10.5z"/><path d="M12 15.5V21"/></svg>`
 
 export function userBadge(): string {
   return `<div id="dsh-account" style="display:none" data-fixed="false" data-rail="false">
@@ -58,6 +60,7 @@ export function userBadge(): string {
 <span class="dsh-acct-ident"><span id="dsh-account-name" class="dsh-acct-name"></span><span id="dsh-account-role" class="dsh-acct-role"></span></span>
 </button>
 <div id="dsh-account-menu" role="menu" data-open="false">
+<button id="dsh-account-integrations" class="dsh-acct-row" type="button" role="menuitem">${INTEGRATIONS_ICON}<span>集成</span></button>
 <button id="dsh-account-admin" class="dsh-acct-row" type="button" role="menuitem" hidden>${ADMIN_ICON}<span>管理</span></button>
 <button id="dsh-account-settings" class="dsh-acct-row" type="button" role="menuitem">${SETTINGS_ICON}<span>设置</span></button>
 <button id="dsh-account-change-password" class="dsh-acct-row" type="button" role="menuitem">${KEY_ICON}<span>修改密码</span></button>
@@ -176,6 +179,11 @@ export function userBadge(): string {
   trigger.addEventListener('click', (event) => {
     event.stopPropagation()
     setMenuOpen(menu.dataset.open !== 'true')
+  })
+  document.getElementById('dsh-account-integrations').addEventListener('click', (event) => {
+    event.stopPropagation()
+    setMenuOpen(false)
+    if (typeof window.__dshIntegrationsOpen === 'function') window.__dshIntegrationsOpen()
   })
   document.getElementById('dsh-account-settings').addEventListener('click', (event) => {
     event.stopPropagation()

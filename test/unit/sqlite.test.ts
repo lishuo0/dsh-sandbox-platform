@@ -179,4 +179,59 @@ describe('SqliteDb', () => {
     // 幂等：第二次迁移不会因为列或索引已存在而失败。
     await migrate(db)
   })
+
+  it('migrate 把老渠道表的 provider 约束放宽到 GitHub，且不带走回信', async () => {
+    // 老库只允许飞书；重建表时要保住已有渠道和引用它的回信。
+    await db.exec(`
+      CREATE TABLE dsh_users (id text PRIMARY KEY, display_name text NOT NULL, password_hash text NOT NULL);
+      INSERT INTO dsh_users (id, display_name, password_hash) VALUES ('u1', '一', 'x');
+      CREATE TABLE dsh_superagent_channels (
+        id text PRIMARY KEY,
+        user_id text NOT NULL REFERENCES dsh_users(id) ON DELETE CASCADE,
+        provider text NOT NULL CHECK (provider IN ('feishu')),
+        name text NOT NULL DEFAULT '',
+        app_id text NOT NULL,
+        secret_ciphertext blob NOT NULL,
+        secret_key_version integer NOT NULL DEFAULT 1,
+        config text NOT NULL DEFAULT '{}',
+        status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'error')),
+        last_error text,
+        last_event_at text,
+        created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (user_id, provider, app_id)
+      );
+      CREATE TABLE dsh_superagent_outbox (
+        id text PRIMARY KEY,
+        channel_id text NOT NULL REFERENCES dsh_superagent_channels(id) ON DELETE CASCADE,
+        status text NOT NULL DEFAULT 'pending',
+        next_attempt_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      INSERT INTO dsh_superagent_channels (id, user_id, provider, app_id, secret_ciphertext)
+        VALUES ('ch_feishu', 'u1', 'feishu', 'cli_1', X'00');
+      INSERT INTO dsh_superagent_outbox (id, channel_id) VALUES ('ob_1', 'ch_feishu');
+    `)
+
+    await migrate(db)
+
+    // 老渠道和它的回信都还在。
+    expect((await db.query(`SELECT id, provider FROM dsh_superagent_channels`)).rows).toEqual([
+      { id: 'ch_feishu', provider: 'feishu' },
+    ])
+    expect((await db.query(`SELECT id FROM dsh_superagent_outbox`)).rows).toEqual([{ id: 'ob_1' }])
+
+    // GitHub 渠道能存进来了，别的值仍然被挡；第二次迁移不会重复重建表。
+    await db.query(
+      `INSERT INTO dsh_superagent_channels (id, user_id, provider, app_id, secret_ciphertext)
+       VALUES ('ch_gh', 'u1', 'github', 'gh_1', X'01')`,
+    )
+    await expect(
+      db.query(
+        `INSERT INTO dsh_superagent_channels (id, user_id, provider, app_id, secret_ciphertext)
+         VALUES ('ch_x', 'u1', 'gitlab', 'gl_1', X'02')`,
+      ),
+    ).rejects.toThrow(/CHECK/)
+    await migrate(db)
+    expect((await db.query(`SELECT count(*) AS n FROM dsh_superagent_channels`)).rows[0]?.n).toBe(2)
+  })
 })

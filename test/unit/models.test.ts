@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeBaseUrl } from '../../src/modules/models/service.js'
+import {
+  asProtocol,
+  DEFAULT_MODEL_PROTOCOL,
+  MODEL_PROTOCOLS,
+  normalizeBaseUrl,
+} from '../../src/modules/models/service.js'
 
 describe('模型地址归一', () => {
   it('https 地址原样保留，去掉末尾斜杠', () => {
@@ -25,5 +30,20 @@ describe('模型地址归一', () => {
 
   it('带账号密码的地址拒绝', () => {
     expect(normalizeBaseUrl('https://user:pass@api.example.com/v1')).toBeUndefined()
+  })
+})
+
+describe('上游协议', () => {
+  it('四种协议都认，不传就用默认的 OpenAI 兼容', () => {
+    for (const protocol of MODEL_PROTOCOLS) expect(asProtocol(protocol)).toBe(protocol)
+    expect(asProtocol(undefined)).toBe(DEFAULT_MODEL_PROTOCOL)
+    expect(asProtocol(null)).toBe(DEFAULT_MODEL_PROTOCOL)
+    expect(asProtocol('')).toBe(DEFAULT_MODEL_PROTOCOL)
+  })
+
+  it('不认识的协议 422，不能静默按 OpenAI 兼容处理', () => {
+    expect(() => asProtocol('openai')).toThrowError(
+      expect.objectContaining({ status: 422, code: 'model-protocol-invalid' }),
+    )
   })
 })

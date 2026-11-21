@@ -38,6 +38,8 @@ export interface BrainCall {
   requestId?: string
   modelKey?: string
   modelBaseUrl?: string
+  /** 上游线协议（openai-completions / anthropic-messages / …）。 */
+  modelApi?: string
   modelId?: string
   /** 这个成员配置的全部模型；脑按它登记客户端可选模型。 */
   modelIds?: string[]
@@ -396,6 +398,35 @@ export class BrainClient {
     return this.jsonValue(input.path, { ...input, method, body: input.body })
   }
 
+  /**
+   * 接单评估：一次请求一次模型调用，没有会话、没有沙箱。
+   *
+   * 模型密钥和端点随请求头走——脑侧是请求作用域，评估结束即失效，
+   * 不会落到进程里「最近一次」的端点上。归属已经由平台判定。
+   */
+  evaluate(input: {
+    userId: string
+    modelKey: string
+    modelBaseUrl: string
+    modelApi?: string
+    modelId?: string
+    modelIds?: string[]
+    body: unknown
+  }) {
+    return this.jsonValue('/brain/v1/superagent/evaluate', {
+      userId: input.userId,
+      workspaceId: '',
+      sessionId: '',
+      modelKey: input.modelKey,
+      modelBaseUrl: input.modelBaseUrl,
+      ...(input.modelApi === undefined ? {} : { modelApi: input.modelApi }),
+      ...(input.modelId === undefined ? {} : { modelId: input.modelId }),
+      ...(input.modelIds === undefined ? {} : { modelIds: input.modelIds }),
+      method: 'POST',
+      body: input.body,
+    })
+  }
+
   killJob(input: BrainCall & { jobId: string }) {
     return this.jsonValue(`/brain/v1/sessions/${input.sessionId}/jobs/${encodeURIComponent(input.jobId)}/kill`, {
       ...input,
@@ -549,6 +580,7 @@ export class BrainClient {
     if (call.requestId) headers['x-request-id'] = call.requestId
     if (call.modelKey) headers['x-dsh-model-key'] = call.modelKey
     if (call.modelBaseUrl) headers['x-dsh-model-base-url'] = call.modelBaseUrl
+    if (call.modelApi) headers['x-dsh-model-api'] = call.modelApi
     if (call.modelId) headers['x-dsh-model-id'] = call.modelId
     if (call.modelIds && call.modelIds.length > 0) headers['x-dsh-model-ids'] = call.modelIds.join(',')
     if (oss.bucket && oss.endpoint && oss.accessKeyId && oss.accessKeySecret) {

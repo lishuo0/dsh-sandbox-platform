@@ -53,6 +53,69 @@ describe('模型设置', () => {
     })
   })
 
+  it('协议类型可保存、可改，省略时默认 OpenAI 兼容', async () => {
+    const created = await api<{ id: string; api: string }>(platform.baseUrl, '/settings/model', {
+      method: 'POST',
+      token,
+      body: {
+        baseUrl: 'https://anthropic.example.com/v1',
+        api: 'anthropic-messages',
+        apiKey: 'sk-anthropic-key',
+        modelIds: ['claude-sonnet-5-5'],
+        defaultModel: 'claude-sonnet-5-5',
+      },
+    })
+    expect(created.status).toBe(200)
+    expect(created.body.data.api).toBe('anthropic-messages')
+    const id = created.body.data.id
+
+    const read = await api<{ providers: Array<{ id: string; api: string }> }>(platform.baseUrl, '/settings/model', { token })
+    expect(read.body.data.providers.find((provider) => provider.id === id)?.api).toBe('anthropic-messages')
+
+    // 改名改协议：省略密钥时保留原密钥。
+    const updated = await api<{ api: string }>(platform.baseUrl, `/settings/model/${id}`, {
+      method: 'PUT',
+      token,
+      body: {
+        baseUrl: 'https://anthropic.example.com/v1',
+        api: 'openai-responses',
+        modelIds: ['claude-sonnet-5-5'],
+        defaultModel: 'claude-sonnet-5-5',
+      },
+    })
+    expect(updated.status).toBe(200)
+    expect(updated.body.data.api).toBe('openai-responses')
+
+    // 不传协议 = 保持原样，而不是悄悄回落到默认。
+    const kept = await api<{ api: string }>(platform.baseUrl, `/settings/model/${id}`, {
+      method: 'PUT',
+      token,
+      body: { baseUrl: 'https://anthropic.example.com/v1', modelIds: ['claude-sonnet-5-5'], defaultModel: 'claude-sonnet-5-5' },
+    })
+    expect(kept.body.data.api).toBe('openai-responses')
+
+    await api(platform.baseUrl, `/settings/model/${id}`, { method: 'DELETE', token })
+  })
+
+  it('不传协议时新提供商是 OpenAI 兼容，未知协议 422', async () => {
+    const created = await api<{ id: string; api: string }>(platform.baseUrl, '/settings/model', {
+      method: 'POST',
+      token,
+      body: { baseUrl: 'https://openai.example.com/v1', apiKey: 'sk-openai-key', modelIds: ['gpt-4o'], defaultModel: 'gpt-4o' },
+    })
+    expect(created.status).toBe(200)
+    expect(created.body.data.api).toBe('openai-completions')
+    await api(platform.baseUrl, `/settings/model/${created.body.data.id}`, { method: 'DELETE', token })
+
+    const unknown = await api(platform.baseUrl, '/settings/model', {
+      method: 'POST',
+      token,
+      body: { baseUrl: 'https://openai.example.com/v1', api: 'openai', apiKey: 'k', modelIds: ['m'], defaultModel: 'm' },
+    })
+    expect(unknown.status).toBe(422)
+    expect(unknown.body.msg).toBe('model-protocol-invalid')
+  })
+
   it('默认模型必须在名单里', async () => {
     const listed = await api<{ providers: Array<{ id: string }> }>(platform.baseUrl, '/settings/model', { token })
     const id = listed.body.data.providers[0]!.id

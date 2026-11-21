@@ -6,6 +6,7 @@ import { HttpError } from './kernel/errors.js'
 import { startUsageProjection } from './modules/context/projection.js'
 import { bootstrapAdmin } from './modules/identity/routes.js'
 import { startScheduleLoop } from './modules/schedule/loop.js'
+import { startSuperagent } from './modules/superagent/index.js'
 import { backfillSessionWorkspaces } from './modules/workspaces/service.js'
 
 const config = loadConfig()
@@ -23,5 +24,6 @@ try {
 }
 startScheduleLoop(deps)
 startUsageProjection(deps)
+startSuperagent(deps)
 await startPlatform(deps)
 console.log(`platform http://${config.http.host}:${config.http.port}`)
